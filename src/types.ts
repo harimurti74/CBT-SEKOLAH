@@ -1,0 +1,74 @@
+export interface AppConfig {
+  appTitle: string;
+  schoolName: string;
+  token: string;
+  gdriveUrl: string;
+  mapels: string[];
+  kelas: string[];
+  durationMinutes: number;
+  maxViolations: number;
+  shuffleQuestions: boolean;
+}
+
+export interface ClientQuestion {
+  id: number;
+  subject: string;
+  type: 'mcq' | 'tf' | 'short' | 'checkbox';
+  typeTitle: string;
+  questionCode: string;
+  assignedVariantCode?: string; // 'A' | 'B' | 'C' | 'D'
+  slideFileName?: string; // e.g. 'INGGRIS_1A'
+  questionText: string;
+  options: string[];
+  maxPoints: number;
+  passage?: string;
+  // NOTE: 'key' is NEVER sent to client (Zero Knowledge)
+}
+
+export interface MasterStudent {
+  no: number;
+  name: string;
+  noPeserta: string;
+  className: string;
+  subject: string;
+}
+
+export interface StudentSubmission {
+  id: string;
+  schoolName: string;
+  studentName: string;
+  noPeserta: string;
+  className: string;
+  subject: string;
+  assignedPackage?: string;
+  answers: Record<number, string | string[]>;
+  violationsCount: number;
+  startTime: string;
+  submitTime: string;
+  score: number;
+  maxScore: number;
+  percentage: number;
+  status: 'Selesai' | 'Curang (Disubmit)' | 'Direset';
+  syncedToGdrive: boolean;
+  gdriveSyncTime?: string;
+}
+
+export interface ScoreBreakdownItem {
+  questionId: number;
+  userAnswer: string | string[];
+  correctAnswer: string | string[];
+  scoreEarned: number;
+  maxPoints: number;
+  isCorrect: boolean;
+  variantCode?: string;
+}
+
+export interface AuditVulnerability {
+  id: string;
+  name: string;
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM';
+  legacyStatus: string;
+  legacyExplanation: string;
+  secureStatus: string;
+  secureExplanation: string;
+}
