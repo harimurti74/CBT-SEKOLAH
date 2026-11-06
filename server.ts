@@ -23,6 +23,7 @@ interface QuestionVariant {
   code: string; // 'A' | 'B' | 'C' | 'D'
   fileName: string; // e.g. 'INGGRIS_1A'
   key: string | string[]; // 'A', 'C', 'B', 'E'
+  imageUrl?: string; // Optional image data URL or image path
 }
 
 interface ServerQuestion {
@@ -35,6 +36,7 @@ interface ServerQuestion {
   options?: string[];
   maxPoints: number;
   passage?: string;
+  imageUrl?: string; // Optional image data URL or image path
   key?: string | string[]; // For single type questions
   variants?: Record<string, QuestionVariant>; // If A/B/C/D multiple types exist
 }
@@ -94,6 +96,17 @@ let STUDENT_ASSIGNMENTS: Record<string, {
 
 // SERVER QUESTION BANK (empty by default for new clean exam, loaded by teacher)
 let SERVER_QUESTION_BANK: ServerQuestion[] = [];
+
+// QUESTION IMAGES REPOSITORY (keyed by lowercase normalized filename e.g. "inggris_1a" or "inggris_1")
+// Supports .jpg, .jpeg, .png, .webp, .pdf base64 data URLs
+let QUESTION_IMAGES_DB: Record<string, {
+  fileName: string; // original filename e.g. "INGGRIS_1A.jpg"
+  cleanName: string; // "inggris_1a"
+  mimeType: string;
+  dataUrl: string; // base64 data url
+  sizeKb: number;
+  uploadedAt: string;
+}> = {};
 
 // Student Submissions DB (empty by default)
 let SUBMISSIONS_DB: StudentSubmission[] = [];
@@ -479,6 +492,82 @@ async function startServer() {
   });
 
   // ==========================================
+  // QUESTION IMAGES REPOSITORY API (JPG/PNG/PDF/WEBP)
+  // Requirement: Upload soal berupa gambar yang nama filenya sama dengan nama soal di template
+  // ==========================================
+  app.get('/api/admin/question-images', (req: Request, res: Response) => {
+    const list = Object.values(QUESTION_IMAGES_DB).map(img => ({
+      fileName: img.fileName,
+      cleanName: img.cleanName,
+      mimeType: img.mimeType,
+      sizeKb: img.sizeKb,
+      uploadedAt: img.uploadedAt,
+      // preview thumbnail or url
+      hasData: !!img.dataUrl
+    }));
+
+    res.json({
+      success: true,
+      images: list,
+      totalCount: list.length
+    });
+  });
+
+  app.post('/api/admin/upload-question-images', (req: Request, res: Response) => {
+    const { files } = req.body;
+    if (!Array.isArray(files) || files.length === 0) {
+      res.status(400).json({ success: false, message: 'Tidak ada file gambar yang diunggah' });
+      return;
+    }
+
+    let addedCount = 0;
+    const addedList: string[] = [];
+
+    files.forEach((f: any) => {
+      const originalName = String(f.name || f.fileName || '').trim();
+      const dataUrl = String(f.dataUrl || f.content || '').trim();
+      const mimeType = String(f.type || f.mimeType || 'image/jpeg');
+
+      if (originalName && dataUrl) {
+        // Strip file extension to get clean question code matching template e.g. "INGGRIS_1A.jpg" -> "inggris_1a"
+        const cleanName = originalName.replace(/\.[^/.]+$/, '').trim().toLowerCase();
+        const sizeKb = Math.round(dataUrl.length / 1024);
+
+        QUESTION_IMAGES_DB[cleanName] = {
+          fileName: originalName,
+          cleanName,
+          mimeType,
+          dataUrl,
+          sizeKb,
+          uploadedAt: new Date().toLocaleTimeString('id-ID')
+        };
+
+        addedCount++;
+        addedList.push(originalName);
+      }
+    });
+
+    res.json({
+      success: true,
+      addedCount,
+      filesUploaded: addedList,
+      totalStoredImages: Object.keys(QUESTION_IMAGES_DB).length,
+      message: `Berhasil mengunggah & memetakan ${addedCount} file gambar soal!`
+    });
+  });
+
+  app.delete('/api/admin/question-image/:cleanName', (req: Request, res: Response) => {
+    const { cleanName } = req.params;
+    const key = cleanName.toLowerCase().trim();
+    if (QUESTION_IMAGES_DB[key]) {
+      delete QUESTION_IMAGES_DB[key];
+      res.json({ success: true, message: `Gambar ${key} berhasil dihapus` });
+    } else {
+      res.status(404).json({ success: false, message: 'Gambar tidak ditemukan' });
+    }
+  });
+
+  // ==========================================
   // STUDENT LOGIN VERIFICATION (Requirement 1 & Crosscheck)
   // ==========================================
   app.post('/api/exam/verify-student', (req: Request, res: Response) => {
@@ -594,6 +683,20 @@ async function startServer() {
         activeFileName = v.fileName;
       }
 
+      // Lookup matched image from repository using normalized filename e.g. "inggris_1a" or "inggris_1"
+      const lookupKeys = [
+        activeFileName.toLowerCase().trim(),
+        q.questionCode.toLowerCase().trim(),
+        activeFileName.replace(/\.[^/.]+$/, '').toLowerCase().trim()
+      ];
+      let matchedImageUrl: string | undefined = undefined;
+      for (const k of lookupKeys) {
+        if (QUESTION_IMAGES_DB[k]?.dataUrl) {
+          matchedImageUrl = QUESTION_IMAGES_DB[k].dataUrl;
+          break;
+        }
+      }
+
       return {
         id: q.id,
         subject: q.subject,
@@ -602,6 +705,7 @@ async function startServer() {
         questionCode: q.questionCode,
         assignedVariantCode: activeVariantCode,
         slideFileName: activeFileName,
+        imageUrl: matchedImageUrl,
         questionText: q.questionText || `Soal #${q.id} (${q.subject})`,
         options: q.options || [],
         maxPoints: q.maxPoints,
@@ -812,7 +916,11 @@ async function startServer() {
 
     if (target === 'questions' || target === 'all') {
       SERVER_QUESTION_BANK = [];
+      QUESTION_IMAGES_DB = {};
       Object.keys(STUDENT_ASSIGNMENTS).forEach(k => delete STUDENT_ASSIGNMENTS[k]);
+    }
+    if (target === 'images') {
+      QUESTION_IMAGES_DB = {};
     }
     if (target === 'submissions' || target === 'all') {
       SUBMISSIONS_DB = [];
