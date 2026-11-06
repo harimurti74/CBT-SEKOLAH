@@ -23,7 +23,8 @@ import {
   AlertCircle,
   Sparkles,
   RefreshCw,
-  FolderSync
+  FolderSync,
+  Image as ImageIcon
 } from 'lucide-react';
 
 interface Props {
@@ -62,7 +63,13 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   const [showConfigKeysModal, setShowConfigKeysModal] = useState(false);
   const [showUploadExcelModal, setShowUploadExcelModal] = useState(false);
   const [showUploadQuestionsModal, setShowUploadQuestionsModal] = useState(false);
+  const [showUploadImagesModal, setShowUploadImagesModal] = useState(false);
   const [showClearCacheModal, setShowClearCacheModal] = useState(false);
+
+  // Question Images State (JPG / PNG / PDF)
+  const [questionImagesCount, setQuestionImagesCount] = useState<number>(0);
+  const [questionImagesList, setQuestionImagesList] = useState<any[]>([]);
+  const [previewImagesToUpload, setPreviewImagesToUpload] = useState<any[]>([]);
 
   // Preview States for Uploads
   const [previewStudents, setPreviewStudents] = useState<any[]>([]);
@@ -112,6 +119,13 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       const resQ = await fetch('/api/admin/questions-summary');
       const dataQ = await resQ.json();
       if (dataQ.success) setQuestionsSummary(dataQ.questions);
+
+      const resImg = await fetch('/api/admin/question-images');
+      const dataImg = await resImg.json();
+      if (dataImg.success) {
+        setQuestionImagesCount(dataImg.totalCount || 0);
+        setQuestionImagesList(dataImg.images || []);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -548,6 +562,78 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     }
   };
 
+  // ==========================================
+  // REQUEST USER: UPLOAD SOAL JPG / PNG / PDF
+  // Requirement: Nama file gambar harus sama dengan nama soal di template UPLOAD TIPE DAN KUNCI SOAL
+  // ==========================================
+  const handleImagesFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const filesArr = Array.from(fileList);
+    const loadedPreviews: any[] = [];
+    let processed = 0;
+
+    filesArr.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const dataUrl = evt.target?.result as string;
+        const cleanName = file.name.replace(/\.[^/.]+$/, '').trim().toLowerCase();
+        loadedPreviews.push({
+          name: file.name,
+          cleanName,
+          type: file.type,
+          sizeKb: Math.round(file.size / 1024),
+          dataUrl
+        });
+
+        processed++;
+        if (processed === filesArr.length) {
+          setPreviewImagesToUpload(loadedPreviews);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleConfirmSaveImages = async () => {
+    if (previewImagesToUpload.length === 0) return;
+
+    try {
+      const res = await fetch('/api/admin/upload-question-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: previewImagesToUpload })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(data.message || `Berhasil mengunggah ${previewImagesToUpload.length} gambar soal!`);
+        setShowUploadImagesModal(false);
+        setPreviewImagesToUpload([]);
+        fetchMasterDataSummary();
+      } else {
+        showToast(data.message || 'Gagal mengunggah gambar soal');
+      }
+    } catch (err) {
+      showToast('Gagal mengunggah file gambar ke server');
+    }
+  };
+
+  const handleDeleteImage = async (cleanName: string) => {
+    try {
+      const res = await fetch(`/api/admin/question-image/${encodeURIComponent(cleanName)}`, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`Gambar ${cleanName} dihapus`);
+        fetchMasterDataSummary();
+      }
+    } catch (err) {
+      showToast('Gagal menghapus gambar');
+    }
+  };
+
   // Download Templates
   const downloadStudentTemplate = () => {
     const content = `No ;Nama Siswa;No Peserta;Kelas;Mapel\n1;ADI;2026001;12A;INGGRIS\n2;SUTRISNO;2026002;12B;INGGRIS\n3;BORIS YELSIN;2026003;12C;INGGRIS\n4;SULAIMAN;2026004;12D;INGGRIS\n5;WASIS;2026005;12A;MATEMATIKA\n6;YUNUS;2026006;12B;MATEMATIKA\n`;
@@ -598,14 +684,26 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
             </p>
           </div>
 
-          {/* Quick Action Buttons Group */}
+          {/* Quick Action Buttons Group (Updated according to user request) */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* TAB 1: UPLOAD TIPE DAN KUNCI SOAL (Renamed per user request) */}
             <button
               onClick={() => setShowUploadQuestionsModal(true)}
               className="bg-sky-600 hover:bg-sky-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow"
+              title="Unggah template spreadsheet/CSV berisi tipe soal, daftar slide dan kunci jawaban"
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>UPLOAD SOAL & KUNCI</span>
+              <span>UPLOAD TIPE DAN KUNCI SOAL</span>
+            </button>
+
+            {/* TAB 2: UPLOAD SOAL JPG/PNG (New tab per user request) */}
+            <button
+              onClick={() => setShowUploadImagesModal(true)}
+              className="bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow"
+              title="Unggah berkas slide gambar soal (JPG, PNG, WebP) dengan nama yang sama seperti template kunci"
+            >
+              <ImageIcon className="w-3.5 h-3.5" />
+              <span>UPLOAD SOAL JPG/PNG ({questionImagesCount})</span>
             </button>
 
             <button
@@ -1215,33 +1313,32 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
         </div>
       )}
 
-      {/* MODAL 2: UPLOAD SOAL & KUNCI VARIAN A/B/C/D (POIN 2.b, 2.c, 2.d) */}
+      {/* MODAL 2: UPLOAD TIPE DAN KUNCI SOAL (POIN 2.b, 2.c, 2.d) */}
       {showUploadQuestionsModal && (
         <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl text-white">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <h3 className="font-bold text-sm text-sky-400 flex items-center gap-2">
                 <Upload className="w-4 h-4" />
-                <span>Upload Bank Soal & Kunci Jawaban (Paket Varian A/B/C/D)</span>
+                <span>Upload Tipe dan Kunci Soal (Excel / CSV Varian A/B/C/D)</span>
               </h3>
               <button onClick={() => setShowUploadQuestionsModal(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
             <div className="p-3 bg-sky-950/40 border border-sky-800/80 rounded-xl text-xs space-y-1">
               <div className="flex items-center justify-between">
-                <span className="font-bold text-sky-300">Format Template Soal Sesuai File Anda:</span>
+                <span className="font-bold text-sky-300">Format Template Sesuai File Anda:</span>
                 <button
                   onClick={downloadQuestionsTemplate}
                   className="px-3 py-1 bg-sky-600 hover:bg-sky-500 text-white font-bold text-[11px] rounded-lg transition flex items-center gap-1"
                 >
                   <Download className="w-3 h-3" />
-                  <span>Download Template Soal & Kunci</span>
+                  <span>Download Template Tipe & Kunci</span>
                 </button>
               </div>
               <p className="text-[11px] text-slate-300 leading-relaxed">
                 • Kolom: <code>NO;MAPEL;SOAL;A;B;C;D;KUNCI A;KUNCI B;KUNCI C;kunci D</code><br />
-                • <strong>Tipe Ganda (Varian A/B/C/D):</strong> Jika kolom A, B, C, D diisi nama slide (misal <code>INGGRIS_1A</code>), sistem akan mengacak paket ke tiap siswa dan menguncinya.<br />
-                • <strong>Tipe Tunggal:</strong> Jika kolom A, B, C, D kosong, soal berlaku sama untuk seluruh siswa.
+                • <strong>Penting:</strong> Nama file gambar di tab &ldquo;UPLOAD SOAL JPG/PNG&rdquo; harus sama dengan nama yang tertera di kolom <code>SOAL</code> atau varian <code>A / B / C / D</code>.
               </p>
             </div>
 
@@ -1301,7 +1398,138 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
                 className="px-4 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow flex items-center gap-1.5"
               >
                 <Check className="w-3.5 h-3.5" />
-                <span>Simpan Bank Soal & Varian Kunci</span>
+                <span>Simpan Tipe & Kunci Soal</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL BARU (REQUEST USER): UPLOAD SOAL JPG / PNG / PDF */}
+      {showUploadImagesModal && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-blue-600/70 rounded-2xl max-w-3xl w-full p-6 space-y-4 shadow-2xl text-white">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-blue-600/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
+                  <ImageIcon className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-blue-400">
+                    Upload Berkas Gambar Soal (JPG / PNG / WEBP)
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Unggah gambar slide soal yang sesuai dengan nama kode di template kunci.
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setShowUploadImagesModal(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+
+            {/* Petunjuk Nama File Wajib Sama */}
+            <div className="p-3.5 bg-blue-950/40 border border-blue-800/80 rounded-xl text-xs space-y-1.5">
+              <div className="font-bold text-blue-300 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                <span>Syarat Penamaan Berkas Gambar Soal:</span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                Nama file gambar <strong>harus sama persis</strong> dengan nama soal yang diisi pada template <em>&ldquo;UPLOAD TIPE DAN KUNCI SOAL&rdquo;</em> (tanpa mempedulikan huruf besar/kecil).
+              </p>
+              <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-300 space-y-1">
+                <div>• Contoh Soal Tunggal: Jika di template bernama <strong className="text-sky-300">INGGRIS_1</strong> &rarr; Nama file gambar: <strong className="text-emerald-400">INGGRIS_1.jpg</strong> atau <strong className="text-emerald-400">INGGRIS_1.png</strong></div>
+                <div>• Contoh Soal Varian: Jika di template kolom A/B bernama <strong className="text-purple-300">INGGRIS_1A</strong>, <strong className="text-purple-300">INGGRIS_1B</strong> &rarr; Berkas gambar: <strong className="text-emerald-400">INGGRIS_1A.jpg</strong>, <strong className="text-emerald-400">INGGRIS_1B.jpg</strong></div>
+              </div>
+            </div>
+
+            {/* Area File Input Dropzone (Multiple Files) */}
+            <div className="border-2 border-dashed border-blue-500/50 bg-slate-950/60 rounded-xl p-6 text-center space-y-2">
+              <input
+                type="file"
+                multiple
+                accept="image/jpeg,image/png,image/webp,image/jpg"
+                onChange={handleImagesFileSelect}
+                className="w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:bg-blue-600 file:text-white file:text-xs file:font-bold hover:file:bg-blue-500 cursor-pointer"
+              />
+              <p className="text-[11px] text-slate-400">
+                Pilih atau seret sekaligus beberapa gambar soal (Bisa memilih hingga 100+ file gambar JPG/PNG serentak).
+              </p>
+            </div>
+
+            {/* Preview Selected Images Before Save */}
+            {previewImagesToUpload.length > 0 && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-emerald-400">
+                    Siap Disimpan ({previewImagesToUpload.length} Berkas Dipilih):
+                  </span>
+                  <button 
+                    onClick={() => setPreviewImagesToUpload([])}
+                    className="text-[11px] text-rose-400 hover:underline"
+                  >
+                    Batal Pilih
+                  </button>
+                </div>
+
+                <div className="max-h-48 overflow-y-auto custom-scrollbar border border-slate-800 rounded-xl p-2 grid grid-cols-2 sm:grid-cols-3 gap-2 bg-slate-950">
+                  {previewImagesToUpload.map((img, idx) => (
+                    <div key={idx} className="bg-slate-900 border border-slate-800 rounded-lg p-2 flex items-center gap-2">
+                      <img src={img.dataUrl} alt={img.name} className="w-10 h-10 object-cover rounded bg-slate-950 shrink-0 border border-slate-700" />
+                      <div className="overflow-hidden text-[11px]">
+                        <div className="font-bold text-white truncate" title={img.name}>{img.name}</div>
+                        <div className="text-[10px] font-mono text-emerald-400">&rarr; {img.cleanName}</div>
+                        <div className="text-[9px] text-slate-500">{img.sizeKb} KB</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Daftar Gambar yang Sudah Ada di Server */}
+            {questionImagesList.length > 0 && (
+              <div className="space-y-1.5 pt-1">
+                <div className="text-xs font-bold text-slate-300 flex items-center justify-between">
+                  <span>Berkas Gambar Tersimpan di Sistem ({questionImagesList.length} Gambar):</span>
+                </div>
+                <div className="max-h-32 overflow-y-auto custom-scrollbar border border-slate-800 rounded-xl p-2 grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-950/60 text-xs">
+                  {questionImagesList.map((img, idx) => (
+                    <div key={idx} className="bg-slate-900 border border-slate-800 rounded-lg p-2 flex items-center justify-between gap-1.5">
+                      <div className="overflow-hidden">
+                        <div className="font-mono text-[10px] text-blue-300 font-bold truncate" title={img.fileName}>
+                          {img.fileName}
+                        </div>
+                        <div className="text-[9px] text-slate-500">{img.sizeKb} KB</div>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteImage(img.cleanName)}
+                        className="text-slate-500 hover:text-rose-400 p-1"
+                        title="Hapus gambar ini"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button 
+                onClick={() => {
+                  setShowUploadImagesModal(false);
+                  setPreviewImagesToUpload([]);
+                }} 
+                className="px-4 py-2 bg-slate-800 text-slate-300 text-xs rounded-xl"
+              >
+                Tutup
+              </button>
+              <button
+                onClick={handleConfirmSaveImages}
+                disabled={previewImagesToUpload.length === 0}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Simpan {previewImagesToUpload.length} Gambar Soal</span>
               </button>
             </div>
           </div>

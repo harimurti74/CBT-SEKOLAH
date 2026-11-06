@@ -109,16 +109,21 @@
                         <p class="text-xs text-slate-400 mt-0.5">Atur judul ujian, upload data siswa (excel), unggah slide soal, dan kelola anti-kecurangan.</p>
                     </div>
 
-                    <!-- Action buttons matching screenshot -->
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button onclick="showToast('Bank soal bawaan server aktif!')" class="bg-sky-600 hover:bg-sky-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow">
+                    <!-- Action buttons matching screenshot & updated per user request -->
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button onclick="showToast('Upload Tipe & Kunci Soal aktif!')" class="bg-sky-600 hover:bg-sky-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow">
                             <i class="fa-solid fa-cloud-arrow-up"></i>
-                            <span>UPLOAD SOAL</span>
+                            <span>UPLOAD TIPE DAN KUNCI SOAL</span>
+                        </button>
+
+                        <button onclick="showToast('Gunakan tab ini di aplikasi utama untuk mengunggah gambar JPG/PNG!')" class="bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow">
+                            <i class="fa-solid fa-image"></i>
+                            <span>UPLOAD SOAL JPG/PNG</span>
                         </button>
 
                         <button onclick="openConfigModal()" class="bg-purple-600 hover:bg-purple-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow">
                             <i class="fa-solid fa-key"></i>
-                            <span>Kunci & Tipe Soal</span>
+                            <span>Status Varian</span>
                         </button>
 
                         <button onclick="openExcelUploadModal()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow">

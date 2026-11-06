@@ -18,6 +18,7 @@ export interface ClientQuestion {
   questionCode: string;
   assignedVariantCode?: string; // 'A' | 'B' | 'C' | 'D'
   slideFileName?: string; // e.g. 'INGGRIS_1A'
+  imageUrl?: string; // Base64 data URL or uploaded image URL
   questionText: string;
   options: string[];
   maxPoints: number;

@@ -642,27 +642,63 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               </div>
 
               {/* Rendered Slide Content */}
-              <div className="w-[820px] min-h-[460px] p-8 flex flex-col justify-between bg-white text-slate-900">
-                <div className="space-y-6">
+              <div className="w-[840px] max-w-[90vw] min-h-[460px] max-h-[82vh] p-6 sm:p-8 flex flex-col justify-between bg-white text-slate-900 overflow-y-auto custom-scrollbar">
+                <div className="space-y-4">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-3">
                     <div className="flex items-center gap-2 text-xs text-slate-500 font-semibold">
                       <span>{config.schoolName}</span>
                       <span>·</span>
                       <span className="text-sky-700 font-bold">{currentQ?.subject}</span>
                     </div>
-                    <span className="text-xs font-mono font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
-                      Slide Soal #{currentIndex + 1}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {currentQ?.imageUrl && (
+                        <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                          Gambar / Slide Soal Aktif
+                        </span>
+                      )}
+                      <span className="text-xs font-mono font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                        Slide Soal #{currentIndex + 1}
+                      </span>
+                    </div>
                   </div>
 
+                  {/* DISPLAY ATTACHED QUESTION IMAGE (JPG/PNG/WEBP) IF UPLOADED */}
+                  {currentQ?.imageUrl && (
+                    <div className="rounded-xl overflow-hidden border border-slate-300 bg-slate-50 relative group shadow-sm flex flex-col items-center justify-center p-2">
+                      <img 
+                        src={currentQ.imageUrl} 
+                        alt={`Soal ${currentQ.questionCode}`}
+                        className="max-h-[380px] w-auto object-contain rounded-lg transition-transform"
+                      />
+                      <div className="w-full text-center text-[10px] font-mono text-slate-500 pt-1 border-t border-slate-200 mt-1 flex items-center justify-between px-2">
+                        <span>Kode File: <strong>{currentQ.slideFileName || currentQ.questionCode}</strong></span>
+                        <span className="text-slate-400">Gunakan tombol zoom di atas untuk memperbesar gambar</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* LONG SCROLLABLE PASSAGE / TEXT KHUSUS SOAL BAHASA (INDONESIA / INGGRIS) */}
+                  {currentQ?.passage && (
+                    <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200/90 text-slate-800 text-xs leading-relaxed max-h-48 overflow-y-auto custom-scrollbar font-serif shadow-inner">
+                      <div className="text-[11px] font-bold font-sans text-amber-900 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                        <BookOpen className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Teks Bacaan / Wacana Soal (Bisa Di-Scroll)</span>
+                      </div>
+                      <div 
+                        dangerouslySetInnerHTML={{ __html: currentQ.passage }}
+                        className="space-y-1.5 text-slate-800"
+                      />
+                    </div>
+                  )}
+
                   <div className="space-y-2">
-                    <h3 className="text-lg font-bold text-slate-900 leading-snug">
+                    <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
                       {currentQ?.questionText}
                     </h3>
                   </div>
 
                   {currentQ?.options && currentQ.options.length > 0 && currentQ.type !== 'tf' && (
-                    <div className="space-y-2 pt-2">
+                    <div className="space-y-2 pt-1 max-h-60 overflow-y-auto custom-scrollbar pr-1">
                       {currentQ.options.map((opt, oIdx) => {
                         const optLetter = String.fromCharCode(65 + oIdx);
                         return (
@@ -681,7 +717,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
                   )}
                 </div>
 
-                <div className="border-t border-slate-100 pt-4 flex items-center justify-between text-[11px] text-slate-400">
+                <div className="border-t border-slate-100 pt-3 mt-4 flex items-center justify-between text-[11px] text-slate-400">
                   <span>{config.appTitle}</span>
                   <span>Peserta: {studentName} ({noPeserta})</span>
                 </div>
