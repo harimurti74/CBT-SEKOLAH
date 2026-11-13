@@ -63,6 +63,19 @@
           "minLength": 3,
           "maxLength": 20
         },
+        "scheduleEnabled": {
+          "type": "boolean"
+        },
+        "scheduleStart": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "scheduleEnd": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 40
+        },
         "rosterCount": {
           "type": "number"
         },
@@ -95,6 +108,9 @@
         "maxViolations",
         "shuffleQuestions",
         "verificationMode",
+        "scheduleEnabled",
+        "scheduleStart",
+        "scheduleEnd",
         "rosterCount",
         "subjectsCount",
         "imagesCount",

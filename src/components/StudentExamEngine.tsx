@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { 
-  AppConfig, 
-  ClientQuestion, 
+import {
+  AppConfig,
+  ClientQuestion,
   ScoreBreakdownItem,
   StudentSubmission
 } from '../types';
@@ -15,28 +15,34 @@ import {
   submitStudentExamToCloud,
   toFirestoreId
 } from '../services/cbtFirestore';
-import { 
-  BookOpen, 
-  ZoomIn, 
-  ZoomOut, 
-  RotateCcw, 
-  AlertTriangle, 
-  CheckCircle2, 
-  Clock, 
-  ChevronLeft, 
-  ChevronRight, 
-  Send, 
-  ShieldAlert, 
-  Check, 
-  X, 
-  Maximize2, 
-  Minimize2, 
-  Lock,
+import {
+  formatScheduleId,
+  getTypeTitle,
+  gradeQuestionAnswer,
+  normalizeQuestionType
+} from '../utils/questionGrading';
+import {
+  BookOpen,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  ChevronLeft,
+  ChevronRight,
+  Send,
+  ShieldAlert,
+  Check,
+  X,
+  Maximize2,
+  Minimize2,
   CloudCheck,
   GraduationCap,
   ArrowRight,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  CalendarClock
 } from 'lucide-react';
 
 interface Props {
@@ -44,17 +50,23 @@ interface Props {
   onExamComplete?: () => void;
 }
 
+const stripAutoSoalText = (text?: string): string => {
+  const clean = String(text || '').trim();
+  if (!clean) return '';
+  if (/^Soal\s*#\d+(\s*-\s*.*)?$/i.test(clean)) return '';
+  return clean;
+};
+
 export const StudentExamEngine: React.FC<Props> = ({ config }) => {
-  // Safe Fallback for Mapels and Kelas
   const safeMapels = useMemo(() => {
-    return Array.isArray(config?.mapels) && config.mapels.length > 0 
-      ? config.mapels 
+    return Array.isArray(config?.mapels) && config.mapels.length > 0
+      ? config.mapels
       : ['Bahasa Inggris', 'Biologi', 'Fisika', 'Matematika', 'Kimia', 'TIK'];
   }, [config?.mapels]);
 
   const safeKelas = useMemo(() => {
-    return Array.isArray(config?.kelas) && config.kelas.length > 0 
-      ? config.kelas 
+    return Array.isArray(config?.kelas) && config.kelas.length > 0
+      ? config.kelas
       : ['X-1', 'X-2', 'XI-IPA-1', 'XI-IPA-2', 'XII-MIPA', '12A', '12B'];
   }, [config?.kelas]);
 
@@ -68,14 +80,13 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
 
-  // Check URL Parameters for Unique Link Auto-Fill (Requirement 6 & Poin 1)
+  // Sync URL parameters
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const paramMapel = params.get('mapel');
     const paramKelas = params.get('kelas');
     const paramToken = params.get('token');
 
-    // If 'all' or empty, let student freely pick from dropdown
     if (paramMapel && paramMapel !== 'all' && paramMapel !== 'ALL' && safeMapels.includes(paramMapel)) {
       setSelectedMapel(paramMapel);
     }
@@ -87,7 +98,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     }
   }, [config, safeMapels, safeKelas]);
 
-  // Keep state synced with config updates: if current selection is invalid, reset to first valid option
   useEffect(() => {
     if (safeMapels.length > 0 && (!selectedMapel || !safeMapels.includes(selectedMapel))) {
       setSelectedMapel(safeMapels[0]);
@@ -127,19 +137,80 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     storageDestination: string;
   } | null>(null);
 
-  // Handle Student Login (Hybrid: Server API with Client-Side Fallback for GitHub Pages & Vercel)
+  // Sync browser fullscreenchange event
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
+
+  const exitFullscreenSafely = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+  };
+
+  // Validate Schedule Window
+  const checkScheduleWindow = (
+    enabled?: boolean,
+    startStr?: string,
+    endStr?: string,
+    durationMins?: number
+  ): { ok: boolean; message?: string; cappedSeconds?: number } => {
+    const baseSeconds = (Number(durationMins) || 90) * 60;
+    if (!enabled) {
+      return { ok: true, cappedSeconds: baseSeconds };
+    }
+    const nowMs = Date.now();
+    const startMs = startStr ? new Date(startStr).getTime() : NaN;
+    const endMs = endStr ? new Date(endStr).getTime() : NaN;
+
+    if (!Number.isNaN(startMs) && nowMs < startMs) {
+      return {
+        ok: false,
+        message: `Ujian belum dibuka! Jadwal mulai pengerjaan: ${formatScheduleId(startStr)}.`
+      };
+    }
+    if (!Number.isNaN(endMs) && nowMs > endMs) {
+      return {
+        ok: false,
+        message: `Waktu pengerjaan ujian telah berakhir pada ${formatScheduleId(endStr)}.`
+      };
+    }
+
+    if (!Number.isNaN(endMs)) {
+      const secsUntilEnd = Math.max(60, Math.floor((endMs - nowMs) / 1000));
+      return { ok: true, cappedSeconds: Math.min(baseSeconds, secsUntilEnd) };
+    }
+    return { ok: true, cappedSeconds: baseSeconds };
+  };
+
+  // Handle Student Login
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    setLoginLoading(true);
 
     const cleanName = studentName.trim().toUpperCase();
     const cleanNo = noPeserta.trim();
     const cleanToken = inputToken.trim().toUpperCase();
     const cleanSubj = selectedMapel.trim();
 
+    if (!cleanName || !cleanNo || !cleanToken) {
+      setLoginError('Lengkapi Nama Lengkap, No. Peserta, dan TOKEN Ujian terlebih dahulu.');
+      return;
+    }
+
+    // Request fullscreen synchronously inside user gesture on submit
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+
+    setLoginLoading(true);
+
     try {
-      // 1. Attempt connection to Server API
+      // 1. Attempt Server API
       let serverAvailable = false;
       let data: any = null;
 
@@ -156,7 +227,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           })
         });
 
-        // If server responded with JSON (including 401, 403, 200)
         const contentType = res.headers.get('content-type') || '';
         if (contentType.includes('application/json')) {
           data = await res.json();
@@ -169,15 +239,28 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
             serverAvailable = false;
           }
         }
-      } catch (networkErr) {
-        // Network failure or static host without backend
+      } catch (_) {
         serverAvailable = false;
       }
 
-      // If Server is ONLINE and processed request:
       if (serverAvailable && data) {
         if (!data.success) {
+          exitFullscreenSafely();
           setLoginError(data.message || 'Login gagal, periksa TOKEN dari pengawas.');
+          setLoginLoading(false);
+          return;
+        }
+
+        // Also validate client config schedule in case server config lagged
+        const localSched = checkScheduleWindow(
+          config.scheduleEnabled,
+          config.scheduleStart,
+          config.scheduleEnd,
+          config.durationMinutes
+        );
+        if (!localSched.ok) {
+          exitFullscreenSafely();
+          setLoginError(localSched.message || 'Di luar jadwal ujian.');
           setLoginLoading(false);
           return;
         }
@@ -186,7 +269,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           setAssignedPackage(data.assignedPackage);
         }
 
-        // Fetch Questions from server
         try {
           const qRes = await fetch(
             `/api/exam/questions?subject=${encodeURIComponent(cleanSubj)}&noPeserta=${encodeURIComponent(cleanNo)}`
@@ -194,7 +276,18 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           const qData = await qRes.json();
 
           if (qData.success && qData.questions && qData.questions.length > 0) {
-            setQuestions(qData.questions);
+            const cleanServerQuestions: ClientQuestion[] = qData.questions.map((q: any) => {
+              const norm = normalizeQuestionType(q.type);
+              return {
+                ...q,
+                type: norm,
+                typeTitle: q.typeTitle || getTypeTitle(norm),
+                questionText: stripAutoSoalText(q.questionText),
+                statementLabels: Array.isArray(q.statementLabels) ? q.statementLabels : undefined
+              };
+            });
+
+            setQuestions(cleanServerQuestions);
             if (qData.meta?.assignedPackage) {
               setAssignedPackage(qData.meta.assignedPackage);
             }
@@ -207,30 +300,28 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
             }
 
             setIsLoggedIn(true);
-            setTimeRemaining(config.durationMinutes * 60);
+            setCurrentIndex(0);
+            setTimeRemaining(localSched.cappedSeconds || config.durationMinutes * 60);
             setIsSubmitted(false);
             setFinalResult(null);
             setLoginLoading(false);
             return;
           } else {
+            exitFullscreenSafely();
             setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru di menu Administrasi Guru.`);
             setLoginLoading(false);
             return;
           }
         } catch (_) {
-          // If questions fetch fails, fall through to client storage
+          // Fall through to Cloud/Local engine
         }
       }
 
-      // ==========================================
       // 2. CLOUD FIRESTORE + CLIENT CBT ENGINE
-      // (Used on Vercel, MS Edge, multi-device, and offline fallback)
-      // ==========================================
       const urlParams = new URLSearchParams(window.location.search);
       const targetExamId = urlParams.get('exam') || config.examId || getOrCreateLocalExamId(config.schoolName);
       setActiveExamId(targetExamId);
 
-      // Fetch latest exam metadata from Firestore (if synced by teacher)
       let cloudExam = null;
       try {
         cloudExam = await fetchExamFromCloud(targetExamId);
@@ -243,15 +334,33 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
       const effectiveDuration = cloudExam?.durationMinutes || config.durationMinutes || 90;
       const effectiveSchoolName = cloudExam?.schoolName || config.schoolName;
       const effectiveShuffle = cloudExam?.shuffleQuestions ?? config.shuffleQuestions;
+      const effectiveSchedEnabled = cloudExam?.scheduleEnabled ?? config.scheduleEnabled;
+      const effectiveSchedStart = cloudExam?.scheduleStart ?? config.scheduleStart;
+      const effectiveSchedEnd = cloudExam?.scheduleEnd ?? config.scheduleEnd;
 
-      // A. Verify TOKEN
+      // Verify Schedule
+      const schedCheck = checkScheduleWindow(
+        effectiveSchedEnabled,
+        effectiveSchedStart,
+        effectiveSchedEnd,
+        effectiveDuration
+      );
+      if (!schedCheck.ok) {
+        exitFullscreenSafely();
+        setLoginError(schedCheck.message || 'Ujian berada di luar jadwal yang ditentukan.');
+        setLoginLoading(false);
+        return;
+      }
+
+      // Verify Token
       if (cleanToken !== effectiveToken) {
+        exitFullscreenSafely();
         setLoginError(`TOKEN Ujian Salah! Masukkan Token resmi dari guru pengawas (Contoh: ${effectiveToken})`);
         setLoginLoading(false);
         return;
       }
 
-      // B. Cross-check with Master Student Roster (Cloud Firestore first, fallback to localStorage)
+      // Cross-check with Master Student Roster
       const isCrosscheckMode = effectiveVerificationMode !== 'manual';
       let masterStudents: any[] = [];
       try {
@@ -267,6 +376,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
             cleanName.includes(String(cloudStudent.name).toUpperCase())
           );
           if (!nameMatches) {
+            exitFullscreenSafely();
             setLoginError(`DATA SISWA TIDAK COCOK DI MASTER EXCEL!\nNama "${cleanName}" dengan No. Peserta "${cleanNo}" tidak terdaftar. Silakan kroscek dengan pengawas atau ubah mode ke 'Peserta Umum / Manual' di administrasi guru.`);
             setLoginLoading(false);
             return;
@@ -277,6 +387,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
             (String(s.name).toUpperCase().includes(cleanName) || cleanName.includes(String(s.name).toUpperCase()))
           );
           if (!match) {
+            exitFullscreenSafely();
             setLoginError(`DATA SISWA TIDAK COCOK DI MASTER EXCEL!\nNama "${cleanName}" dengan No. Peserta "${cleanNo}" tidak terdaftar. Silakan kroscek dengan pengawas atau ubah mode ke 'Peserta Umum / Manual' di administrasi guru.`);
             setLoginLoading(false);
             return;
@@ -284,7 +395,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         }
       }
 
-      // C. Load Question Bank (Cloud Firestore first, fallback to localStorage)
+      // Load Question Bank
       let matchedQuestions: any[] = [];
       try {
         matchedQuestions = await fetchSubjectBankForStudent(targetExamId, cleanSubj);
@@ -308,23 +419,22 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
       }
 
       if (matchedQuestions.length === 0) {
+        exitFullscreenSafely();
         const availableSubjects = Array.from(new Set(localBank.map((q: any) => q.subject))).filter(Boolean);
         if (availableSubjects.length > 0) {
           setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru di menu Administrasi Guru.\n(Mapel yang sudah memiliki bank soal: ${availableSubjects.join(', ')})`);
         } else {
-          setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru. Silakan buka menu "Administrasi Guru", pastikan sudah Login Google Guru (Cloud Sync), lalu unggah file soal di tab "UPLOAD TIPE DAN KUNCI SOAL".`);
+          setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru. Silakan buka menu "Administrasi Guru" dan unggah soal terlebih dahulu.`);
         }
         setLoginLoading(false);
         return;
       }
 
-      // Deterministic or random variant selection ('A' | 'B' | 'C' | 'D')
       const variantLetters = ['A', 'B', 'C', 'D'];
       const chosenPkgCode = variantLetters[
         Array.from(cleanNo).reduce((acc, ch) => acc + ch.charCodeAt(0), 0) % 4
       ];
 
-      // D. Collect all image keys needed and fetch from Cloud Firestore + localStorage
       let imageRepo: Record<string, any> = {};
       try {
         const rawImgs = localStorage.getItem('cbt_question_images');
@@ -348,7 +458,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         imageRepo = { ...imageRepo, ...cloudImages };
       } catch (_) {}
 
-      // E. Create or Resume Student Submission in Cloud Firestore
       let initialAnswers: Record<number, string | string[]> = {};
       let initialViolations = 0;
       let isResumingSession = false;
@@ -368,6 +477,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           });
 
           if (subRes.blocked) {
+            exitFullscreenSafely();
             setLoginError(subRes.message || 'Anda sudah menyelesaikan ujian ini.');
             setLoginLoading(false);
             return;
@@ -384,14 +494,14 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         }
       }
 
-      // F. Store grading bank (kept separate from ClientQuestion UI state)
       setGradingBank(matchedQuestions);
 
-      // G. Secure Zero-Knowledge Sanitization for Client Engine
+      // Zero-Knowledge Sanitization (No key, no file sequence leak, no "Soal #X - MAPEL")
       const sanitizedQuestions: ClientQuestion[] = matchedQuestions.map((q: any, idx: number) => {
         const baseCode = q.questionCode || `${targetSubj}_${idx + 1}`;
         const activeVariant = q.variants?.[chosenPkgCode] ? chosenPkgCode : 'A';
         const activeFileName = q.variants?.[activeVariant]?.fileName || q.slideFileName || baseCode;
+        const normType = normalizeQuestionType(q.type);
 
         const lookupKeys = [
           activeFileName.toLowerCase().trim(),
@@ -410,17 +520,26 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           }
         }
 
+        const stmtLabels: string[] | undefined =
+          normType === 'matrix'
+            ? (Array.isArray(q.statementLabels) && q.statementLabels.length > 0
+                ? q.statementLabels.slice(0, 5)
+                : ['A', 'B', 'C', 'D', 'E'])
+            : undefined;
+
         return {
           id: q.id || idx + 1,
           subject: q.subject || targetSubj,
-          type: q.type || 'mcq',
-          typeTitle: q.typeTitle || 'Pilihan Ganda',
+          type: normType,
+          typeTitle: q.typeTitle || getTypeTitle(normType),
           questionCode: baseCode,
           assignedVariantCode: activeVariant,
           slideFileName: activeFileName,
           imageUrl: matchedImageUrl,
-          questionText: `Soal #${idx + 1} - ${cleanSubj}`,
+          questionText: stripAutoSoalText(q.questionText),
           options: q.options || ['A', 'B', 'C', 'D', 'E'],
+          statementLabels: stmtLabels,
+          statementTexts: Array.isArray(q.statementTexts) ? q.statementTexts : undefined,
           maxPoints: q.maxPoints || 10,
           passage: q.passage
         };
@@ -431,16 +550,18 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         : sanitizedQuestions;
 
       setQuestions(finalQuestions);
+      setCurrentIndex(0);
       setAssignedPackage(`Paket ${chosenPkgCode}`);
       setAnswers(initialAnswers);
       setViolationsCount(initialViolations);
       setIsLoggedIn(true);
-      setTimeRemaining(effectiveDuration * 60);
+      setTimeRemaining(schedCheck.cappedSeconds || effectiveDuration * 60);
       setIsSubmitted(false);
       setFinalResult(null);
 
     } catch (err: any) {
       console.error('Login process error:', err);
+      exitFullscreenSafely();
       setLoginError(`Gagal memproses login: ${err?.message || 'Periksa data diri dan TOKEN'}`);
     } finally {
       setLoginLoading(false);
@@ -465,7 +586,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     });
   }, [isLoggedIn, isSubmitted, config.maxViolations]);
 
-  // Window Focus / Tab-Switch Detection
   useEffect(() => {
     if (!isLoggedIn || isSubmitted) return;
 
@@ -506,7 +626,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     return () => clearInterval(interval);
   }, [isLoggedIn, isSubmitted]);
 
-  // Submit Exam (Hybrid: Server-Side Grading -> Cloud Firestore + Local Evaluation)
+  // Submit Exam
   const submitExamToServer = async (isForced = false) => {
     setShowFinishConfirm(false);
     setShowWarningModal(false);
@@ -547,7 +667,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
       console.warn('Server submit unavailable, evaluating via Cloud/Client engine:', err);
     }
 
-    // Cloud + Client-side grading (for Vercel static / MS Edge / cross-browser)
     if (!submitted) {
       let totalEarned = 0;
       let totalMax = 0;
@@ -571,17 +690,14 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         const correctKey = String(variantKey || bankItem?.key || 'A');
         const studentAns = answers[q.id];
 
-        let isCorrect = false;
-        if (studentAns && String(studentAns).trim().toUpperCase() === correctKey.trim().toUpperCase()) {
-          isCorrect = true;
-          totalEarned += maxPts;
-        }
+        const { scoreEarned, isCorrect } = gradeQuestionAnswer(q.type, studentAns, correctKey, maxPts);
+        totalEarned += scoreEarned;
 
         breakdown.push({
           questionId: q.id,
           userAnswer: studentAns || '',
           correctAnswer: correctKey,
-          scoreEarned: isCorrect ? maxPts : 0,
+          scoreEarned,
           maxPoints: maxPts,
           isCorrect,
           variantCode: q.assignedVariantCode
@@ -655,23 +771,15 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
     } else {
       document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
     }
   };
 
   const currentQ = questions[currentIndex];
-
-  // Answer mode: 'mcq' or 'short' (supports isian singkat & pilihan ganda)
+  const currentNormType = normalizeQuestionType(currentQ?.type);
   const [answerMode, setAnswerMode] = useState<'mcq' | 'short'>('mcq');
 
-  // Dynamic available options based on Jenjang Sekolah
-  // SD/MI -> 3 opsi: A, B, C
-  // SLB -> 3 opsi: A, B, C
-  // SMP/MTs -> 4 opsi: A, B, C, D
-  // SMA/MA/SMK/MAK -> 5 opsi: A, B, C, D, E
   const availableOptions = useMemo(() => {
     const level = config.schoolLevel || 'SMA/MA/SMK/MAK';
     if (level === 'SD/MI' || level === 'SLB') {
@@ -683,14 +791,13 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     return ['A', 'B', 'C', 'D', 'E'];
   }, [config.schoolLevel]);
 
-  // Sync answerMode when question changes
   useEffect(() => {
-    if (currentQ?.type === 'short') {
+    if (currentNormType === 'short') {
       setAnswerMode('short');
     } else {
       setAnswerMode('mcq');
     }
-  }, [currentQ?.id, currentQ?.type]);
+  }, [currentQ?.id, currentNormType]);
 
   const handleSelectMCQ = useCallback((opt: string) => {
     if (!currentQ) return;
@@ -710,16 +817,33 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
 
   const handleToggleCheckbox = useCallback((opt: string) => {
     if (!currentQ) return;
-    const current = Array.isArray(answers[currentQ.id]) ? (answers[currentQ.id] as string[]) : [];
-    const updated = current.includes(opt)
-      ? current.filter(x => x !== opt)
-      : [...current, opt].sort();
+    setAnswers(prev => {
+      const current = Array.isArray(prev[currentQ.id]) ? (prev[currentQ.id] as string[]) : [];
+      const updated = current.includes(opt)
+        ? current.filter(x => x !== opt)
+        : [...current, opt].sort();
+      return {
+        ...prev,
+        [currentQ.id]: updated
+      };
+    });
+  }, [currentQ]);
 
-    setAnswers(prev => ({
-      ...prev,
-      [currentQ.id]: updated
-    }));
-  }, [currentQ, answers]);
+  const handleSelectMatrixStatement = useCallback(
+    (stmtIdx: number, val: 'TEPAT' | 'TIDAK TEPAT', totalCount: number) => {
+      if (!currentQ) return;
+      setAnswers(prev => {
+        const existing = Array.isArray(prev[currentQ.id]) ? [...(prev[currentQ.id] as string[])] : [];
+        while (existing.length < totalCount) existing.push('');
+        existing[stmtIdx] = existing[stmtIdx] === val ? '' : val;
+        return {
+          ...prev,
+          [currentQ.id]: existing
+        };
+      });
+    },
+    [currentQ]
+  );
 
   const handleInputShort = useCallback((val: string) => {
     if (!currentQ) return;
@@ -737,36 +861,46 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     }));
   }, [currentQ]);
 
-  // Global Keyboard Shortcuts: A, B, C, D, E, 1, 2, 3, 4, 5, Arrows, Space
+  // Global Keyboard Shortcuts
   useEffect(() => {
     if (!isLoggedIn || isSubmitted || !currentQ) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't intercept if user is typing in a text input or textarea
       const target = e.target as HTMLElement;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
         return;
       }
 
       const key = e.key.toUpperCase();
-
-      // Options hotkeys: A, B, C, D, E
-      if (availableOptions.includes(key)) {
-        e.preventDefault();
-        handleSelectMCQ(key);
-        return;
-      }
-
-      // Numbers 1, 2, 3, 4, 5
       const numMap: Record<string, string> = { '1': 'A', '2': 'B', '3': 'C', '4': 'D', '5': 'E' };
-      if (numMap[key] && availableOptions.includes(numMap[key])) {
-        e.preventDefault();
-        handleSelectMCQ(numMap[key]);
-        return;
+
+      if ((currentNormType === 'slide_image' || currentNormType === 'mcq') && answerMode === 'mcq') {
+        if (availableOptions.includes(key)) {
+          e.preventDefault();
+          handleSelectMCQ(key);
+          return;
+        }
+        if (numMap[key] && availableOptions.includes(numMap[key])) {
+          e.preventDefault();
+          handleSelectMCQ(numMap[key]);
+          return;
+        }
       }
 
-      // True/False hotkeys
-      if (currentQ.type === 'tf') {
+      if (currentNormType === 'checkbox') {
+        if (availableOptions.includes(key)) {
+          e.preventDefault();
+          handleToggleCheckbox(key);
+          return;
+        }
+        if (numMap[key] && availableOptions.includes(numMap[key])) {
+          e.preventDefault();
+          handleToggleCheckbox(numMap[key]);
+          return;
+        }
+      }
+
+      if (currentNormType === 'tf') {
         if (key === 'B') {
           e.preventDefault();
           handleSelectTF('BENAR');
@@ -779,7 +913,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         }
       }
 
-      // Navigation: Next (ArrowRight or Enter)
       if (e.key === 'ArrowRight' || e.key === 'Enter') {
         e.preventDefault();
         if (currentIndex < questions.length - 1) {
@@ -788,7 +921,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         return;
       }
 
-      // Navigation: Previous (ArrowLeft)
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
         if (currentIndex > 0) {
@@ -797,7 +929,6 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         return;
       }
 
-      // Toggle Ragu-Ragu: Space
       if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault();
         toggleDoubt();
@@ -807,7 +938,20 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isLoggedIn, isSubmitted, currentQ, currentIndex, questions.length, availableOptions, handleSelectMCQ, handleSelectTF, toggleDoubt]);
+  }, [
+    isLoggedIn,
+    isSubmitted,
+    currentQ,
+    currentNormType,
+    answerMode,
+    currentIndex,
+    questions.length,
+    availableOptions,
+    handleSelectMCQ,
+    handleSelectTF,
+    handleToggleCheckbox,
+    toggleDoubt
+  ]);
 
   const formatTime = (secs: number) => {
     const h = Math.floor(secs / 3600);
@@ -816,56 +960,79 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
+  const isQuestionAnswered = (val: string | string[] | undefined): boolean => {
+    if (!val) return false;
+    if (Array.isArray(val)) return val.some(v => String(v || '').trim() !== '');
+    return String(val).trim() !== '';
+  };
+
   const answeredCount = useMemo(() => {
-    return Object.values(answers).filter(val => {
-      if (!val) return false;
-      if (Array.isArray(val)) return val.length > 0;
-      return String(val).trim() !== '';
-    }).length;
+    return Object.values(answers).filter(isQuestionAnswered).length;
   }, [answers]);
 
   // ==========================================
-  // VIEW 1: LOGIN SCREEN (EXACTLY LIKE IMAGE_A29D47C0.PNG)
+  // VIEW 1: LOGIN SCREEN (BRIGHT YOUTHFUL TKA)
   // ==========================================
   if (!isLoggedIn) {
     return (
-      <div className="flex-1 flex items-center justify-center p-4 sm:p-6 bg-[#0c1322]">
-        <div className="bg-[#131b2e] border border-slate-700/80 rounded-2xl max-w-md w-full p-6 sm:p-8 shadow-2xl space-y-6 text-white relative">
-          
-          {/* Header Icon & Manual Title */}
-          <div className="text-center space-y-1.5 border-b border-slate-700/60 pb-5">
-            <div className="w-12 h-12 bg-sky-500/20 text-sky-400 rounded-2xl flex items-center justify-center mx-auto text-xl mb-3 border border-sky-400/30 shadow-inner">
-              <GraduationCap className="w-6 h-6" />
+      <div className="flex-1 flex items-center justify-center p-4 sm:p-6 bg-gradient-to-br from-[#f0f7ff] via-[#f8fafc] to-[#eefbf5]">
+        <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-xl shadow-sky-900/5 space-y-5 text-slate-900 relative">
+
+          {/* Header Icon & Title */}
+          <div className="text-center space-y-2 border-b border-slate-100 pb-5">
+            <div className="w-13 h-13 bg-gradient-to-br from-sky-500 to-indigo-600 text-white rounded-2xl flex items-center justify-center mx-auto shadow-md shadow-sky-500/20 mb-2">
+              <GraduationCap className="w-7 h-7" />
             </div>
-            
-            {/* Manual Assessment / Exam Title (Requirement 3) */}
-            <h2 className="text-base sm:text-lg font-bold text-slate-100 uppercase tracking-wide">
+
+            <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 uppercase tracking-tight">
               {config.appTitle || 'SIMULASI UJIAN CBT SLIDE'}
             </h2>
-            
-            <p className="text-xs text-slate-400">
-              Masukan data diri Anda dengan benar sebelum memulai ujian.
+
+            <p className="text-xs text-slate-500">
+              Masukkan data diri Anda dengan benar sebelum memulai ujian.
             </p>
 
-            {/* School Single Display (Requirement 2 & 4: Only 1 school shown, completely private from other schools) */}
-            <div className="pt-1">
-              <span className="text-[11px] font-semibold text-sky-400 font-mono bg-sky-950/60 px-2.5 py-0.5 rounded-full border border-sky-800/80">
+            <div className="pt-1 flex items-center justify-center gap-2 flex-wrap">
+              <span className="text-xs font-bold text-sky-700 bg-sky-50 px-3 py-1 rounded-xl border border-sky-200">
                 {config.schoolName || 'SMA Negeri 1 Teladan'}
               </span>
             </div>
           </div>
 
-          {loginError && (
-            <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span>{loginError}</span>
+          {/* Schedule Banner */}
+          {config.scheduleEnabled && (config.scheduleStart || config.scheduleEnd) ? (
+            <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-900 text-[11px] flex items-start gap-2.5">
+              <CalendarClock className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <div className="font-bold text-indigo-950">Jadwal Pengerjaan Aktif ({config.durationMinutes} Menit)</div>
+                {config.scheduleStart && (
+                  <div className="text-indigo-800">Mulai: <strong>{formatScheduleId(config.scheduleStart)}</strong></div>
+                )}
+                {config.scheduleEnd && (
+                  <div className="text-indigo-800">Batas Akhir: <strong>{formatScheduleId(config.scheduleEnd)}</strong></div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] flex items-center justify-between">
+              <span className="font-semibold flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Waktu Pengerjaan: Fleksibel</span>
+              </span>
+              <span className="font-bold font-mono text-emerald-700">{config.durationMinutes} Menit</span>
             </div>
           )}
 
-          <form onSubmit={handleLogin} className="space-y-4 text-xs font-semibold text-slate-300">
-            {/* Nama Lengkap (Huruf Kapital) */}
+          {loginError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
+              <span className="whitespace-pre-line font-medium">{loginError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleLogin} className="space-y-4 text-xs font-semibold text-slate-700">
             <div>
-              <label className="block mb-1.5 text-slate-300">
+              <label className="block mb-1.5 text-slate-700">
                 Nama Lengkap (Huruf Kapital):
               </label>
               <input
@@ -874,13 +1041,12 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
                 value={studentName}
                 onChange={e => setStudentName(e.target.value.toUpperCase())}
                 placeholder="CONTOH: BUDI SANTOSO"
-                className="w-full bg-[#0a0f1d] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-bold text-white uppercase tracking-wider focus:outline-none focus:border-sky-500 placeholder:text-slate-600"
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-900 uppercase tracking-wider focus:outline-none focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 placeholder:text-slate-400"
               />
             </div>
 
-            {/* No. Peserta / Nomor Absen */}
             <div>
-              <label className="block mb-1.5 text-slate-300">
+              <label className="block mb-1.5 text-slate-700">
                 No. Peserta / Nomor Absen:
               </label>
               <input
@@ -889,20 +1055,19 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
                 value={noPeserta}
                 onChange={e => setNoPeserta(e.target.value)}
                 placeholder="Contoh: 20261099 atau Absen 12"
-                className="w-full bg-[#0a0f1d] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold text-white focus:outline-none focus:border-sky-500 placeholder:text-slate-600"
+                className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 placeholder:text-slate-400"
               />
             </div>
 
-            {/* Grid 2 cols: Pilih Mapel & Pilih Kelas (Requirement 5) */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block mb-1.5 text-slate-300">
+                <label className="block mb-1.5 text-slate-700">
                   Pilih Mapel:
                 </label>
                 <select
                   value={selectedMapel}
                   onChange={e => setSelectedMapel(e.target.value)}
-                  className="w-full bg-[#0a0f1d] border border-slate-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-sky-500"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
                 >
                   {safeMapels.map(m => (
                     <option key={m} value={m}>{m}</option>
@@ -911,13 +1076,13 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               </div>
 
               <div>
-                <label className="block mb-1.5 text-slate-300">
+                <label className="block mb-1.5 text-slate-700">
                   Pilih Kelas:
                 </label>
                 <select
                   value={selectedKelas}
                   onChange={e => setSelectedKelas(e.target.value)}
-                  className="w-full bg-[#0a0f1d] border border-slate-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-sky-500"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-xs font-bold text-slate-900 focus:outline-none focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
                 >
                   {safeKelas.map(k => (
                     <option key={k} value={k}>{k}</option>
@@ -926,9 +1091,8 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               </div>
             </div>
 
-            {/* TOKEN Ujian dari Guru */}
             <div>
-              <label className="block mb-1.5 text-slate-300">
+              <label className="block mb-1.5 text-slate-700">
                 TOKEN Ujian dari Guru:
               </label>
               <input
@@ -937,7 +1101,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
                 value={inputToken}
                 onChange={e => setInputToken(e.target.value.toUpperCase())}
                 placeholder="MASUKKAN TOKEN SOAL..."
-                className="w-full bg-[#0a0f1d] border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-mono font-black tracking-widest text-emerald-400 uppercase focus:outline-none focus:border-emerald-500 placeholder:text-slate-600"
+                className="w-full bg-emerald-50/50 border border-emerald-300 rounded-xl px-3.5 py-2.5 text-xs font-mono font-black tracking-widest text-emerald-700 uppercase focus:outline-none focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 placeholder:text-slate-400"
               />
             </div>
 
@@ -945,13 +1109,13 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               <button
                 type="submit"
                 disabled={loginLoading}
-                className="w-full py-3 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-xl transition shadow flex items-center justify-center gap-2 text-xs"
+                className="w-full py-3 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-700 hover:to-indigo-700 text-white font-bold rounded-xl transition shadow-md shadow-sky-600/20 flex items-center justify-center gap-2 text-xs"
               >
                 {loginLoading ? (
                   <span>Menghubungi Server CBT...</span>
                 ) : (
                   <>
-                    <span>MASUK & MULAI UJIAN</span>
+                    <span>MASUK &amp; MULAI UJIAN (LAYAR PENUH)</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
@@ -965,48 +1129,67 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
   }
 
   // ==========================================
-  // VIEW 2: POST-SUBMISSION RESULTS
+  // VIEW 2: POST-SUBMISSION RESULTS (WITH FULLSCREEN EXIT ICON)
   // ==========================================
   if (isSubmitted && finalResult) {
     return (
-      <div className="max-w-4xl mx-auto p-6 space-y-6">
-        <div className="bg-[#131b2e] border border-slate-700/80 rounded-2xl p-6 md:p-8 shadow-2xl space-y-6 text-white">
-          <div className="text-center space-y-2 border-b border-slate-700/60 pb-6">
-            <div className="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto text-xl font-bold border border-emerald-400/30">
-              <CheckCircle2 className="w-7 h-7" />
+      <div className="flex-1 flex items-center justify-center p-4 sm:p-6 bg-gradient-to-br from-[#f0f7ff] via-[#f8fafc] to-[#eefbf5]">
+        <div className="bg-white border border-slate-200 rounded-3xl max-w-3xl w-full p-6 md:p-8 shadow-xl space-y-6 text-slate-900">
+          <div className="text-center space-y-2 border-b border-slate-100 pb-6">
+            <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto border border-emerald-200 shadow-xs">
+              <CheckCircle2 className="w-8 h-8" />
             </div>
-            <h2 className="text-xl md:text-2xl font-bold text-slate-100">
-              Ujian Selesai & Jawaban Tersimpan di Server
+            <h2 className="text-xl md:text-2xl font-extrabold text-slate-900">
+              Ujian Selesai &amp; Jawaban Tersimpan
             </h2>
-            <p className="text-xs text-slate-400">
-              Peserta: <strong className="text-white">{studentName}</strong> ({noPeserta}) · {selectedKelas}
+            <p className="text-xs text-slate-600">
+              Peserta: <strong className="text-slate-900">{studentName}</strong> ({noPeserta}) &middot; Kelas <strong className="text-sky-700">{selectedKelas}</strong> &middot; {selectedMapel}
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
-            <div className="p-4 rounded-xl bg-slate-900 border border-slate-700">
-              <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Nilai Akhir (Skala 100)</div>
-              <div className="text-4xl font-extrabold text-amber-300 font-mono mt-1">{finalResult.score}</div>
+            <div className="p-4 rounded-2xl bg-sky-50 border border-sky-200">
+              <div className="text-[11px] font-bold text-sky-700 uppercase tracking-wider">Nilai Akhir (Skala 100)</div>
+              <div className="text-4xl font-black text-sky-700 font-mono tabular-nums mt-1">{finalResult.score}</div>
             </div>
-            <div className="p-4 rounded-xl bg-slate-900 border border-slate-700">
-              <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Poin Diperoleh</div>
-              <div className="text-4xl font-extrabold text-emerald-400 font-mono mt-1">{finalResult.totalEarned} / {finalResult.totalMax}</div>
+            <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200">
+              <div className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">Poin Diperoleh</div>
+              <div className="text-4xl font-black text-emerald-700 font-mono tabular-nums mt-1">{finalResult.totalEarned} / {finalResult.totalMax}</div>
             </div>
-            <div className="p-4 rounded-xl bg-slate-900 border border-slate-700">
-              <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Pelanggaran</div>
-              <div className="text-4xl font-extrabold text-rose-400 font-mono mt-1">{violationsCount}x</div>
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200">
+              <div className="text-[11px] font-bold text-rose-700 uppercase tracking-wider">Pelanggaran</div>
+              <div className="text-4xl font-black text-rose-700 font-mono tabular-nums mt-1">{violationsCount}x</div>
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-800 text-emerald-300 flex items-start gap-3">
-            <CloudCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+          <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex items-start gap-3">
+            <CloudCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
             <div className="text-xs space-y-1">
-              <div className="font-bold text-white">Jawaban & Nilai Tersimpan Aman di Database Sekolah:</div>
-              <div className="text-[11px] text-emerald-300">{finalResult.storageDestination}</div>
+              <div className="font-bold text-emerald-950">Jawaban &amp; Nilai Tersimpan Aman di Database Sekolah:</div>
+              <div className="text-[11px] text-emerald-800">{finalResult.storageDestination}</div>
             </div>
           </div>
 
-          <div className="pt-2 flex justify-end">
+          <div className="pt-2 flex flex-wrap items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold text-xs rounded-xl transition flex items-center gap-2 whitespace-nowrap shrink-0"
+              title="Masuk atau Keluar dari Mode Layar Penuh"
+            >
+              {isFullscreen ? (
+                <>
+                  <Minimize2 className="w-4 h-4 text-sky-600" />
+                  <span>Keluar Layar Penuh</span>
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="w-4 h-4 text-sky-600" />
+                  <span>Layar Penuh</span>
+                </>
+              )}
+            </button>
+
             <button
               onClick={() => {
                 setIsLoggedIn(false);
@@ -1021,16 +1204,14 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
                 setViolationsCount(0);
                 setTimeRemaining(config.durationMinutes * 60);
 
-                // Clear any stored active session
                 try {
                   localStorage.removeItem('cbt_active_session');
                   sessionStorage.removeItem('cbt_active_session');
                 } catch (_) {}
 
-                // Scroll to top to ensure clean view
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-xl transition shadow flex items-center gap-1.5"
+              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl transition shadow flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>Kembali ke Laman Login Siswa</span>
@@ -1042,59 +1223,61 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
   }
 
   // ==========================================
-  // VIEW 3: ACTIVE EXAM INTERFACE (CBT SLIDE VIEW)
+  // VIEW 3: ACTIVE EXAM INTERFACE (BRIGHT YOUTHFUL TKA)
   // ==========================================
+  const matrixLabels = currentQ?.statementLabels && currentQ.statementLabels.length > 0
+    ? currentQ.statementLabels
+    : ['A', 'B', 'C', 'D', 'E'];
+
   return (
-    <div className="flex-1 flex flex-col p-3 gap-3 bg-[#0c1322] text-slate-100 select-none overflow-hidden">
-      
-      {/* PROMINENT TOP BAR: NAMA, NO PESERTA, KELAS, MAPEL & SISA WAKTU (BESAR & JELAS) */}
-      <header className="bg-slate-900 border border-slate-700/80 rounded-xl p-3 px-4 sm:px-6 shadow-xl flex flex-wrap items-center justify-between gap-3 shrink-0">
-        
-        {/* Identitas Peserta: Font Lebih Besar & Mudah Terlihat */}
+    <div className="flex-1 flex flex-col p-2.5 sm:p-3 gap-2.5 bg-[#f4f8fc] text-slate-900 select-none overflow-hidden">
+
+      {/* PROMINENT TOP BAR */}
+      <header className="bg-white border border-slate-200 rounded-2xl p-3 px-4 sm:px-6 shadow-xs flex flex-wrap items-center justify-between gap-3 shrink-0">
+
+        {/* Student Identity */}
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-sky-500/20 text-sky-400 border border-sky-400/30 flex items-center justify-center font-black text-lg shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
             <GraduationCap className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm sm:text-base md:text-lg font-black text-white tracking-wide uppercase">
+              <span className="text-sm sm:text-base md:text-lg font-black text-slate-900 tracking-wide uppercase">
                 {studentName}
               </span>
-              <span className="bg-sky-950 text-sky-300 border border-sky-700/70 font-mono text-xs sm:text-sm font-bold px-2.5 py-0.5 rounded-lg shadow-inner">
+              <span className="bg-sky-50 text-sky-700 border border-sky-200 font-mono text-xs sm:text-sm font-bold px-2.5 py-0.5 rounded-lg">
                 No: {noPeserta}
               </span>
             </div>
-            <div className="text-xs sm:text-sm font-semibold text-slate-400 flex items-center gap-2 mt-0.5">
-              <span className="text-sky-300">{selectedMapel}</span>
-              <span>·</span>
-              <span className="text-indigo-300">Kelas {selectedKelas}</span>
-              <span className="hidden md:inline">·</span>
-              <span className="hidden md:inline text-slate-400">{config.schoolName}</span>
+            <div className="text-xs sm:text-sm font-semibold text-slate-600 flex items-center gap-2 mt-0.5">
+              <span className="text-sky-700 font-bold">{selectedMapel}</span>
+              <span className="text-slate-300">&middot;</span>
+              <span className="text-indigo-700 font-bold">Kelas {selectedKelas}</span>
+              <span className="hidden md:inline text-slate-300">&middot;</span>
+              <span className="hidden md:inline text-slate-500">{config.schoolName}</span>
             </div>
           </div>
         </div>
 
-        {/* Indikator Sisa Waktu & Pelanggaran: Font Besar & Kontras Tinggi */}
-        <div className="flex items-center gap-3 sm:gap-4 ml-auto">
-          {/* Sisa Waktu Besar */}
-          <div className="bg-slate-950 border border-amber-600/50 px-3.5 sm:px-5 py-1.5 sm:py-2 rounded-xl flex items-center gap-2 sm:gap-3 shadow-lg ring-1 ring-amber-500/30">
-            <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400 shrink-0 animate-pulse" />
+        {/* Remaining Time & Violations */}
+        <div className="flex items-center gap-2.5 sm:gap-3 ml-auto">
+          <div className="bg-amber-50 border border-amber-300 px-3.5 sm:px-5 py-1.5 rounded-xl flex items-center gap-2.5 shadow-xs">
+            <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-amber-600 shrink-0" />
             <div>
-              <div className="text-[10px] uppercase font-bold tracking-wider text-amber-400/80 leading-none">
+              <div className="text-[10px] uppercase font-bold tracking-wider text-amber-700 leading-none">
                 Sisa Waktu
               </div>
-              <div className="font-mono text-base sm:text-xl md:text-2xl font-black text-amber-300 tracking-wider leading-tight">
+              <div className="font-mono tabular-nums text-base sm:text-xl md:text-2xl font-black text-amber-900 tracking-wider leading-tight">
                 {formatTime(timeRemaining)}
               </div>
             </div>
           </div>
 
-          {/* Status Pelanggaran */}
-          <div className="bg-slate-950 border border-slate-800 px-3 py-1.5 sm:py-2 rounded-xl flex items-center gap-2 text-center">
-            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+          <div className="bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl flex items-center gap-2 text-center">
+            <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
             <div className="text-left">
-              <div className="text-[9px] uppercase font-bold text-slate-400 leading-none">Langgar</div>
-              <div className="font-mono text-xs sm:text-sm font-bold text-rose-400 leading-tight">
+              <div className="text-[9px] uppercase font-bold text-rose-700 leading-none">Langgar</div>
+              <div className="font-mono tabular-nums text-xs sm:text-sm font-bold text-rose-800 leading-tight">
                 {violationsCount}/{config.maxViolations}
               </div>
             </div>
@@ -1105,62 +1288,59 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
 
       {/* BODY VIEW CONTAINER */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden gap-3">
-        
+
         {/* MAIN VIEWPORT */}
-        <main className="flex-1 flex flex-col bg-slate-900 rounded-xl border border-slate-800 overflow-hidden relative shadow-lg">
-          
+        <main className="flex-1 flex flex-col bg-white rounded-2xl border border-slate-200 overflow-hidden relative shadow-sm">
+
           {/* Top Question Toolbar */}
-          <div className="bg-slate-950 border-b border-slate-800 px-3 sm:px-4 py-2.5 flex items-center justify-between text-xs gap-2 sm:gap-3 flex-wrap">
-            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-              {/* NOMOR SOAL ATAS (SINKRON DENGAN NOMOR SOAL BAWAH & PETA SOAL) */}
-              <span className="bg-sky-500/20 text-sky-300 border border-sky-500/40 px-3 py-1 rounded-lg font-black text-xs sm:text-sm flex items-center gap-1.5 shadow-sm">
+          <div className="bg-slate-50 border-b border-slate-200 px-3 sm:px-4 py-2 flex items-center justify-between text-xs gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="bg-sky-600 text-white px-3 py-1 rounded-xl font-black text-xs sm:text-sm flex items-center gap-1.5 shadow-xs">
                 <span>Soal No.</span>
-                <strong className="text-white text-sm sm:text-base font-mono">{currentIndex + 1}</strong>
-                <span className="font-normal text-slate-400">/ {questions.length}</span>
+                <strong className="text-sm sm:text-base font-mono tabular-nums">{currentIndex + 1}</strong>
+                <span className="font-normal text-sky-100">/ {questions.length}</span>
               </span>
-              
-              <span className="bg-purple-950/80 text-purple-300 border border-purple-800/80 px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono">
-                {assignedPackage} (Terkunci)
+
+              <span className="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2.5 py-1 rounded-lg text-[11px] font-bold font-mono">
+                {assignedPackage}
               </span>
-              
-              <span className="text-slate-300 font-semibold text-[11px] hidden md:inline">
-                Tipe: <strong className="text-white">{currentQ?.typeTitle || 'Slide Interaktif'}</strong>
+
+              <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-2.5 py-1 rounded-lg text-[11px] font-bold hidden md:inline">
+                {currentQ?.typeTitle || getTypeTitle(currentNormType)}
               </span>
             </div>
 
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* TOGGLE PANEL PETA SOAL (REQUEST USER: SEMBUNYIKAN / TAMPILKAN AGAR SOAL MAKSIMAL) */}
+            <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(prev => !prev)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition border flex items-center gap-1.5 shadow ${
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition border flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
                   isSidebarOpen
-                    ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
-                    : 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 ring-2 ring-emerald-400/40 animate-pulse'
+                    ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'
+                    : 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600 shadow-xs'
                 }`}
-                title={isSidebarOpen ? 'Sembunyikan panel nomor soal di sebelah kanan agar soal lebih lebar' : 'Buka panel nomor soal'}
+                title={isSidebarOpen ? 'Sembunyikan panel nomor soal agar soal lebih lebar' : 'Buka panel nomor soal'}
               >
                 {isSidebarOpen ? (
                   <>
-                    <PanelRightClose className="w-3.5 h-3.5 text-sky-400" />
-                    <span className="hidden sm:inline">Tutup Panel Kanan</span>
+                    <PanelRightClose className="w-3.5 h-3.5 text-sky-600" />
+                    <span className="hidden sm:inline">Tutup Panel</span>
                   </>
                 ) : (
                   <>
                     <PanelRightOpen className="w-3.5 h-3.5 text-white" />
-                    <span>Buka Peta Soal ({questions.length})</span>
+                    <span>Peta Soal ({questions.length})</span>
                   </>
                 )}
               </button>
 
-              {/* Mode Lebar Soal: Lebar Penuh vs Standar */}
               <button
                 type="button"
                 onClick={() => setIsFullWidthSlide(prev => !prev)}
-                className={`px-2 py-1 rounded-lg text-xs font-semibold border transition hidden sm:flex items-center gap-1 ${
-                  isFullWidthSlide 
-                    ? 'bg-sky-600 text-white border-sky-400' 
-                    : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition hidden sm:flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                  isFullWidthSlide
+                    ? 'bg-sky-600 text-white border-sky-600'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
                 }`}
                 title="Pilih mode lebar soal untuk tampilan teks maksimal"
               >
@@ -1170,10 +1350,10 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               {currentQ?.passage && (
                 <button
                   onClick={() => setShowPassage(prev => !prev)}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition border ${
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition border whitespace-nowrap shrink-0 ${
                     showPassage
-                      ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
-                      : 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
+                      ? 'bg-amber-500 text-white border-amber-500'
+                      : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
                   }`}
                 >
                   <BookOpen className="w-3.5 h-3.5" />
@@ -1182,27 +1362,27 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               )}
 
               {/* Zoom Controls */}
-              <div className="flex items-center bg-slate-900 border border-slate-800 rounded-lg p-0.5">
+              <div className="flex items-center bg-white border border-slate-300 rounded-xl p-0.5">
                 <button
                   onClick={() => setZoomLevel(z => Math.max(0.7, z - 0.15))}
-                  className="px-2 py-1 text-slate-300 hover:text-white hover:bg-slate-800 rounded"
+                  className="px-2 py-1 text-slate-700 hover:bg-slate-100 rounded-lg"
                   title="Perkecil Tampilan"
                 >
                   <ZoomOut className="w-3.5 h-3.5" />
                 </button>
-                <span className="px-1.5 font-mono text-[11px] text-slate-300 font-bold">
+                <span className="px-1.5 font-mono tabular-nums text-[11px] text-slate-800 font-bold">
                   {Math.round(zoomLevel * 100)}%
                 </span>
                 <button
                   onClick={() => setZoomLevel(z => Math.min(2.0, z + 0.15))}
-                  className="px-2 py-1 text-slate-300 hover:text-white hover:bg-slate-800 rounded"
+                  className="px-2 py-1 text-slate-700 hover:bg-slate-100 rounded-lg"
                   title="Perbesar Tampilan"
                 >
                   <ZoomIn className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => setZoomLevel(1.0)}
-                  className="px-1.5 py-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded"
+                  className="px-1.5 py-1 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg"
                   title="Reset 100%"
                 >
                   <RotateCcw className="w-3 h-3" />
@@ -1210,20 +1390,28 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
               </div>
 
               <button
+                type="button"
                 onClick={toggleFullscreen}
-                className="p-1.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 rounded-lg"
-                title="Layar Penuh"
+                className="px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 font-semibold rounded-xl flex items-center gap-1 whitespace-nowrap shrink-0"
+                title={isFullscreen ? 'Keluar dari Mode Layar Penuh' : 'Aktifkan Mode Layar Penuh'}
               >
-                {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                {isFullscreen ? (
+                  <Minimize2 className="w-3.5 h-3.5 text-sky-600" />
+                ) : (
+                  <Maximize2 className="w-3.5 h-3.5 text-sky-600" />
+                )}
+                <span className="hidden md:inline text-[11px]">
+                  {isFullscreen ? 'Keluar Layar Penuh' : 'Layar Penuh'}
+                </span>
               </button>
             </div>
           </div>
 
-          {/* Center Canvas Area (Slide Viewport with Dynamic Watermark & Unconstrained Vertical Scrolling) */}
-          <div className="flex-1 flex overflow-hidden relative bg-slate-950">
-            
+          {/* Center Canvas Area */}
+          <div className="flex-1 flex overflow-hidden relative bg-[#eef4fb]">
+
             {showPassage && currentQ?.passage && (
-              <div className="w-full md:w-5/12 bg-amber-50 text-slate-900 border-r border-amber-300 p-4 overflow-y-auto select-text shadow-xl z-10 space-y-3 font-serif text-xs leading-relaxed">
+              <div className="w-full md:w-5/12 bg-amber-50 text-slate-900 border-r border-amber-200 p-4 overflow-y-auto select-text shadow-md z-10 space-y-3 font-serif text-xs leading-relaxed">
                 <div className="flex items-center justify-between border-b border-amber-200 pb-2">
                   <span className="font-bold text-amber-950 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
                     <BookOpen className="w-3.5 h-3.5 text-amber-700" />
@@ -1236,435 +1424,491 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div 
+                <div
                   dangerouslySetInnerHTML={{ __html: currentQ.passage }}
                   className="space-y-2 text-slate-800"
                 />
               </div>
             )}
 
-            {/* Viewport Scroll Container: Gunakan items-start agar teks panjang tidak terpotong saat di-zoom */}
+            {/* Viewport Scroll Container */}
             <div className="flex-1 relative overflow-auto p-3 sm:p-5 flex items-start justify-center custom-scrollbar">
-              <div 
-                style={{ 
+              <div
+                style={{
                   transform: `scale(${zoomLevel})`,
                   transformOrigin: 'top center',
                   width: zoomLevel > 1 ? `${Math.round(zoomLevel * 100)}%` : '100%',
                   maxWidth: isFullWidthSlide ? '100%' : '960px'
                 }}
-                className="transition-transform duration-150 relative shadow-2xl rounded-2xl bg-white text-slate-900 border border-slate-200 my-2"
+                className="transition-transform duration-150 relative shadow-md rounded-2xl bg-white text-slate-900 border border-slate-200 my-1"
               >
-                {/* Dynamic Forensic Watermark to Prevent Mobile Camera Leaks */}
-                <div className="absolute inset-0 pointer-events-none z-20 flex flex-col justify-around items-center opacity-12 rotate-[-15deg] select-none text-center">
+                {/* Dynamic Forensic Watermark */}
+                <div className="absolute inset-0 pointer-events-none z-20 flex flex-col justify-around items-center opacity-10 rotate-[-15deg] select-none text-center">
                   <div className="font-mono text-xs md:text-sm font-bold text-slate-900 uppercase tracking-widest">
-                    {studentName} · {noPeserta} · {config.schoolName}
+                    {studentName} &middot; {noPeserta} &middot; {config.schoolName}
                   </div>
                   <div className="font-mono text-xs md:text-sm font-bold text-slate-900 uppercase tracking-widest">
-                    CBT RESMI {new Date().toLocaleDateString('id-ID')} · {selectedKelas} · DILARANG MEMOTRET
+                    CBT RESMI {new Date().toLocaleDateString('id-ID')} &middot; {selectedKelas}
                   </div>
                 </div>
 
-                {/* Rendered Slide Content: Bebas tinggi (natural height) agar teks Bahasa Indonesia/Inggris panjang dapat di-scroll penuh */}
-                <div className="w-full min-h-[460px] p-5 sm:p-8 flex flex-col justify-between bg-white text-slate-900">
+                {/* Rendered Slide Content */}
+                <div className="w-full min-h-[420px] p-5 sm:p-7 flex flex-col justify-between bg-white text-slate-900 rounded-2xl">
                   <div className="space-y-4">
                     <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-                      <div className="flex items-center gap-2 text-xs text-slate-500 font-semibold">
+                      <div className="flex items-center gap-2 text-xs text-slate-600 font-semibold">
                         <span>{config.schoolName}</span>
-                        <span>·</span>
+                        <span className="text-slate-300">&middot;</span>
                         <span className="text-sky-700 font-bold">{currentQ?.subject || selectedMapel}</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {currentQ?.imageUrl && (
-                          <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
-                            Berkas Gambar Slide Aktif
-                          </span>
-                        )}
-                        <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 border border-slate-200 px-2.5 py-0.5 rounded">
+                        <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 border border-slate-200 px-2.5 py-0.5 rounded-lg">
                           Soal #{currentIndex + 1} dari {questions.length}
                         </span>
                       </div>
                     </div>
 
-                    {/* DISPLAY ATTACHED QUESTION IMAGE (JPG/PNG/WEBP): Bebas scroll ke bawah tanpa terpotong */}
-                    {currentQ?.imageUrl && (
-                      <div className="rounded-xl overflow-hidden border border-slate-300 bg-slate-50 relative group shadow-sm flex flex-col items-center justify-center p-2 sm:p-3">
-                        <img 
-                          src={currentQ.imageUrl} 
+                    {/* Attached Question Image */}
+                    {currentQ?.imageUrl ? (
+                      <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-50 relative shadow-xs flex flex-col items-center justify-center p-2 sm:p-3">
+                        <img
+                          src={currentQ.imageUrl}
                           alt={`Soal #${currentIndex + 1}`}
                           className="w-full max-w-full h-auto object-contain rounded-lg transition-transform"
                         />
                         <div className="w-full text-center text-[10px] text-slate-500 pt-1.5 border-t border-slate-200 mt-2 flex items-center justify-between px-2 flex-wrap gap-2">
-                          <span className="font-bold text-slate-700">Slide Gambar Soal #{currentIndex + 1}</span>
+                          <span className="font-bold text-slate-700">Slide Soal #{currentIndex + 1}</span>
                           <span className="text-slate-400">Teks panjang otomatis dapat di-scroll ke bawah secara penuh</span>
                         </div>
                       </div>
+                    ) : (
+                      !currentQ?.questionText && (
+                        <div className="rounded-xl border border-dashed border-amber-300 bg-amber-50 p-6 text-center text-xs text-amber-800">
+                          Gambar slide soal belum ditemukan atau sedang dimuat. Hubungi pengawas jika slide tidak muncul.
+                        </div>
+                      )
                     )}
 
-                    {/* LONG SCROLLABLE PASSAGE / TEXT KHUSUS SOAL BAHASA (INDONESIA / INGGRIS) */}
+                    {/* Optional Long Scrollable Passage */}
                     {currentQ?.passage && (
                       <div className="p-4 rounded-xl bg-amber-50/80 border border-amber-200 text-slate-800 text-xs sm:text-sm leading-relaxed max-h-64 overflow-y-auto custom-scrollbar font-serif shadow-inner">
                         <div className="text-[11px] font-bold font-sans text-amber-900 uppercase tracking-wider mb-1 flex items-center gap-1.5">
                           <BookOpen className="w-3.5 h-3.5 text-amber-700" />
                           <span>Teks Bacaan / Wacana Soal (Bisa Di-Scroll):</span>
                         </div>
-                        <div 
+                        <div
                           dangerouslySetInnerHTML={{ __html: currentQ.passage }}
                           className="space-y-1.5 text-slate-800"
                         />
                       </div>
                     )}
 
-                    <div className="space-y-2">
-                      <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-                        {currentQ?.questionText || `Soal #${currentIndex + 1} - ${currentQ?.subject || selectedMapel}`}
-                      </h3>
-                    </div>
-
+                    {/* Custom Question Text Only If Teacher Provided Real Question Prompt (Never "Soal #X - MAPEL") */}
+                    {currentQ?.questionText && stripAutoSoalText(currentQ.questionText) !== '' && (
+                      <div className="space-y-2 pt-1">
+                        <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
+                          {currentQ.questionText}
+                        </h3>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="border-t border-slate-200 pt-3 mt-6 flex items-center justify-between text-[11px] text-slate-400">
-                    <span>{config.appTitle}</span>
-                    <span>Peserta: <strong className="text-slate-600">{studentName}</strong> ({noPeserta})</span>
+                  <div className="border-t border-slate-200 pt-3 mt-6 flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="font-semibold text-slate-600">{config.appTitle}</span>
+                    <span>Peserta: <strong className="text-slate-800">{studentName}</strong> ({noPeserta})</span>
                   </div>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Dynamic Answer Input Controls & Navigation Outside Question Viewport (Lingkaran Merah) */}
-          <div className="bg-slate-950 border-t border-slate-800 p-3 sm:px-5 flex flex-col md:flex-row items-center justify-between gap-3 shrink-0 shadow-2xl">
-            
-            {/* Sisi Kiri: Pilihan Jawaban / Mode Uraian Singkat dengan Indikator Nomor Soal Terpadu */}
-            <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
-              <div className="flex items-center gap-2">
-                {/* NOMOR SOAL BAWAH (SINKRON 100% DENGAN NOMOR SOAL DI ATAS) */}
-                <span className="bg-sky-950 text-sky-300 border border-sky-700 font-mono text-xs font-black px-2.5 py-1 rounded-lg shadow-inner">
-                  Soal #{currentIndex + 1}
-                </span>
-                <span className="text-xs font-bold text-slate-400">Pilihan Jawaban:</span>
-              
-              {/* Toggle Mode: Pilihan Ganda (A-E) vs Isian Singkat */}
-              <div className="flex items-center bg-slate-900 p-0.5 rounded-lg border border-slate-800 text-[11px]">
+          {/* BOTTOM ANSWER INPUT DOCK & NAVIGATION */}
+          <div className="bg-white border-t border-slate-200 p-3 sm:px-5 flex flex-col gap-3 shrink-0 shadow-sm">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              {/* Left: Question Number + Type + Answer Controls */}
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 flex-1">
+                <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                  <span className="bg-sky-50 text-sky-800 border border-sky-200 font-mono text-xs font-black px-2.5 py-1 rounded-lg">
+                    Soal #{currentIndex + 1}
+                  </span>
+                  <span className="text-xs font-bold text-slate-700">
+                    {currentNormType === 'matrix'
+                      ? 'Tepat / Tidak Tepat:'
+                      : currentNormType === 'checkbox'
+                      ? 'Multi Jawaban:'
+                      : currentNormType === 'tf'
+                      ? 'Benar / Salah:'
+                      : 'Pilihan Jawaban:'}
+                  </span>
+
+                  {(currentNormType === 'slide_image' || currentNormType === 'mcq' || currentNormType === 'short') && (
+                    <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setAnswerMode('mcq')}
+                        className={`px-2 py-1 rounded-md font-semibold transition ${
+                          answerMode === 'mcq'
+                            ? 'bg-white text-sky-700 shadow-xs font-bold'
+                            : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        Opsi
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAnswerMode('short')}
+                        className={`px-2 py-1 rounded-md font-semibold transition ${
+                          answerMode === 'short'
+                            ? 'bg-white text-sky-700 shadow-xs font-bold'
+                            : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        Isian
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* TYPE 1: PILIHAN GANDA (PG) */}
+                {(currentNormType === 'slide_image' || currentNormType === 'mcq') && answerMode === 'mcq' && (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {availableOptions.map((opt, idx) => {
+                      const isSelected = answers[currentQ?.id] === opt;
+                      return (
+                        <button
+                          key={opt}
+                          type="button"
+                          onClick={() => handleSelectMCQ(opt)}
+                          className={`relative min-w-[44px] h-10 px-3 rounded-xl font-black text-sm transition-all border flex items-center justify-center gap-1 active:scale-95 ${
+                            isSelected
+                              ? 'bg-sky-600 text-white border-sky-600 ring-2 ring-sky-200 shadow-sm'
+                              : 'bg-slate-50 text-slate-800 border-slate-300 hover:bg-sky-50 hover:border-sky-400'
+                          }`}
+                          title={`Pilih jawaban ${opt} (Tekan ${opt} atau ${idx + 1} di keyboard)`}
+                        >
+                          <span>{opt}</span>
+                          <span className={`text-[9px] font-mono hidden sm:inline ${isSelected ? 'text-sky-100' : 'text-slate-400'}`}>
+                            [{idx + 1}]
+                          </span>
+                        </button>
+                      );
+                    })}
+
+                    {answers[currentQ?.id] && (
+                      <button
+                        type="button"
+                        onClick={() => handleSelectMCQ('')}
+                        className="h-10 px-2.5 text-[11px] font-semibold text-slate-500 hover:text-rose-600 transition"
+                      >
+                        Hapus
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* TYPE 2: ISIAN SINGKAT */}
+                {((currentNormType === 'slide_image' || currentNormType === 'mcq' || currentNormType === 'short') && answerMode === 'short') && (
+                  <div className="flex items-center gap-2 w-full sm:w-72">
+                    <input
+                      type="text"
+                      placeholder="Ketik jawaban singkat di sini..."
+                      value={(answers[currentQ?.id] as string) || ''}
+                      onChange={e => handleInputShort(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 font-mono"
+                    />
+                    {answers[currentQ?.id] && (
+                      <button
+                        type="button"
+                        onClick={() => handleInputShort('')}
+                        className="text-xs font-semibold text-slate-500 hover:text-rose-600 whitespace-nowrap"
+                      >
+                        Hapus
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* TYPE 3: SALAH ATAU BENAR (BS) */}
+                {currentNormType === 'tf' && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectTF('BENAR')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition border flex items-center gap-1.5 active:scale-95 ${
+                        answers[currentQ.id] === 'BENAR'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm ring-2 ring-emerald-200'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-emerald-50 hover:border-emerald-300'
+                      }`}
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>BENAR</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectTF('SALAH')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition border flex items-center gap-1.5 active:scale-95 ${
+                        answers[currentQ.id] === 'SALAH'
+                          ? 'bg-rose-600 text-white border-rose-600 shadow-sm ring-2 ring-rose-200'
+                          : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-rose-50 hover:border-rose-300'
+                      }`}
+                    >
+                      <X className="w-4 h-4" />
+                      <span>SALAH</span>
+                    </button>
+                    <span className="text-[11px] text-slate-400 hidden sm:inline">Shortcut: B / S</span>
+                  </div>
+                )}
+
+                {/* TYPE 4: MULTI JAWABAN (MULTI) */}
+                {currentNormType === 'checkbox' && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5">
+                      {availableOptions.map(opt => {
+                        const arr = Array.isArray(answers[currentQ.id]) ? (answers[currentQ.id] as string[]) : [];
+                        const isChecked = arr.includes(opt);
+                        return (
+                          <button
+                            key={opt}
+                            type="button"
+                            onClick={() => handleToggleCheckbox(opt)}
+                            className={`min-w-[42px] h-10 px-3 rounded-xl text-xs font-black transition border flex items-center justify-center gap-1.5 ${
+                              isChecked
+                                ? 'bg-indigo-600 text-white border-indigo-600 ring-2 ring-indigo-200 shadow-sm'
+                                : 'bg-slate-50 text-slate-800 border-slate-300 hover:bg-indigo-50 hover:border-indigo-300'
+                            }`}
+                          >
+                            {isChecked && <Check className="w-3.5 h-3.5" />}
+                            <span>{opt}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <span className="text-[11px] font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-1 rounded-lg">
+                      Bisa pilih lebih dari 1 jawaban
+                    </span>
+                  </div>
+                )}
+
+                {/* TYPE 5: PERNYATAAN TEPAT / TIDAK TEPAT (TT - MAX 5 STATEMENTS A-E) */}
+                {currentNormType === 'matrix' && (
+                  <div className="flex-1 grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    {matrixLabels.map((label, sIdx) => {
+                      const arr = Array.isArray(answers[currentQ.id]) ? (answers[currentQ.id] as string[]) : [];
+                      const selectedVal = arr[sIdx] || '';
+                      return (
+                        <div
+                          key={label}
+                          className="p-2 rounded-xl bg-slate-50 border border-slate-200 flex flex-col gap-1.5"
+                        >
+                          <div className="text-[11px] font-extrabold text-slate-800 text-center">
+                            Pernyataan {label}
+                          </div>
+                          <div className="grid grid-cols-2 gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleSelectMatrixStatement(sIdx, 'TEPAT', matrixLabels.length)}
+                              className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition ${
+                                selectedVal === 'TEPAT'
+                                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                                  : 'bg-white text-slate-700 border-slate-300 hover:bg-emerald-50'
+                              }`}
+                            >
+                              TEPAT
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectMatrixStatement(sIdx, 'TIDAK TEPAT', matrixLabels.length)}
+                              className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition leading-tight ${
+                                selectedVal === 'TIDAK TEPAT'
+                                  ? 'bg-rose-600 text-white border-rose-600 shadow-xs'
+                                  : 'bg-white text-slate-700 border-slate-300 hover:bg-rose-50'
+                              }`}
+                            >
+                              TDK TEPAT
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Navigation Buttons */}
+              <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
                 <button
-                  type="button"
-                  onClick={() => setAnswerMode('mcq')}
-                  className={`px-2 py-1 rounded font-medium transition ${
-                    answerMode === 'mcq'
-                      ? 'bg-sky-500/20 text-sky-300 font-bold'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Pilihan Ganda (A/B/C/D/E)"
+                  onClick={() => setCurrentIndex(i => Math.max(0, i - 1))}
+                  disabled={currentIndex === 0}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-800 text-xs font-bold rounded-xl border border-slate-300 flex items-center gap-1 whitespace-nowrap shrink-0"
                 >
-                  Opsi
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Sebelumnya</span>
                 </button>
+
                 <button
-                  type="button"
-                  onClick={() => setAnswerMode('short')}
-                  className={`px-2 py-1 rounded font-medium transition ${
-                    answerMode === 'short'
-                      ? 'bg-sky-500/20 text-sky-300 font-bold'
-                      : 'text-slate-400 hover:text-slate-200'
+                  onClick={toggleDoubt}
+                  className={`px-3 py-2 text-xs font-bold rounded-xl border transition whitespace-nowrap shrink-0 ${
+                    doubtMap[currentQ?.id]
+                      ? 'bg-amber-500 text-white border-amber-500 shadow-xs'
+                      : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
                   }`}
-                  title="Isian Singkat / Uraian"
                 >
-                  Isian
+                  <span>Ragu-Ragu</span>
                 </button>
+
+                {currentIndex < questions.length - 1 ? (
+                  <button
+                    onClick={() => setCurrentIndex(i => Math.min(questions.length - 1, i + 1))}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl transition flex items-center gap-1 shadow-xs whitespace-nowrap shrink-0"
+                  >
+                    <span>Selanjutnya</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setShowFinishConfirm(true)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition flex items-center gap-1.5 shadow-xs whitespace-nowrap shrink-0"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Kirim Jawaban</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </main>
+
+        {/* RIGHT SIDEBAR (COLLAPSIBLE QUESTION MAP) */}
+        {isSidebarOpen && (
+          <aside className="w-full lg:w-72 bg-white rounded-2xl border border-slate-200 p-4 flex flex-col justify-between gap-4 shrink-0 shadow-sm">
+            <div className="space-y-4">
+              <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-extrabold text-slate-900 truncate">{studentName}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">
+                      {selectedKelas}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsSidebarOpen(false)}
+                      className="text-slate-400 hover:text-slate-800 p-0.5 rounded hover:bg-slate-200 transition"
+                      title="Tutup panel soal agar layar soal lebih lebar"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-600">
+                  No: <strong className="text-slate-900">{noPeserta}</strong> &middot; {selectedMapel}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-200">
+                  <div className="bg-white border border-amber-200 p-2 rounded-lg text-center">
+                    <div className="text-[10px] text-amber-700 font-semibold flex items-center justify-center gap-1">
+                      <Clock className="w-3 h-3 text-amber-600" />
+                      <span>Sisa:</span>
+                    </div>
+                    <div className="font-mono tabular-nums font-bold text-xs text-amber-900 mt-0.5">
+                      {formatTime(timeRemaining)}
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-rose-200 p-2 rounded-lg text-center">
+                    <div className="text-[10px] text-rose-700 font-semibold flex items-center justify-center gap-1">
+                      <ShieldAlert className="w-3 h-3 text-rose-600" />
+                      <span>Langgar:</span>
+                    </div>
+                    <div className="font-mono tabular-nums font-bold text-xs text-rose-800 mt-0.5">
+                      {violationsCount} / {config.maxViolations}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs pb-1 border-b border-slate-200">
+                  <span className="font-bold text-slate-800">Peta Soal Ujian</span>
+                  <span className="text-[11px] font-mono tabular-nums font-semibold text-slate-600">
+                    {answeredCount} / {questions.length} Terjawab
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-5 gap-2 max-h-[320px] overflow-y-auto pr-1 custom-scrollbar">
+                  {questions.map((q, idx) => {
+                    const isCurrent = idx === currentIndex;
+                    const hasAnswer = isQuestionAnswered(answers[q.id]);
+                    const isDoubt = doubtMap[q.id];
+
+                    let bgClass = 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200';
+                    if (isDoubt) bgClass = 'bg-amber-500 text-white font-bold border-amber-500';
+                    else if (hasAnswer) bgClass = 'bg-emerald-600 text-white font-bold border-emerald-600';
+
+                    if (isCurrent) bgClass += ' ring-2 ring-sky-500 ring-offset-2 ring-offset-white font-black';
+
+                    return (
+                      <button
+                        key={q.id || idx}
+                        onClick={() => setCurrentIndex(idx)}
+                        className={`h-9 rounded-xl text-xs font-bold border transition flex items-center justify-center ${bgClass}`}
+                        title={`Pindah ke Soal No. ${idx + 1}`}
+                      >
+                        {idx + 1}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
-            {/* Jika mode MCQ atau tipe soal slide/mcq/umum */}
-            {answerMode === 'mcq' && currentQ?.type !== 'tf' && (
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {availableOptions.map((opt, idx) => {
-                  const isSelected = answers[currentQ?.id] === opt;
-                  return (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => handleSelectMCQ(opt)}
-                      className={`relative min-w-[42px] h-10 px-3 rounded-xl font-black text-sm transition-all border flex items-center justify-center gap-1 active:scale-95 shadow-sm ${
-                        isSelected
-                          ? 'bg-gradient-to-b from-sky-400 to-sky-600 text-slate-950 border-sky-300 ring-2 ring-sky-400/50 shadow-sky-500/30'
-                          : 'bg-slate-900 text-slate-200 border-slate-700 hover:bg-slate-800 hover:border-slate-500 hover:text-white'
-                      }`}
-                      title={`Pilih jawaban ${opt} (Tekan ${opt} atau ${idx + 1} di keyboard)`}
-                    >
-                      <span>{opt}</span>
-                      <span className={`text-[9px] font-mono opacity-60 hidden sm:inline ${isSelected ? 'text-slate-950' : 'text-slate-400'}`}>
-                        [{idx + 1}]
-                      </span>
-                    </button>
-                  );
-                })}
-
-                {/* Tombol Kosongkan / Reset Jawaban */}
-                {answers[currentQ?.id] && (
-                  <button
-                    type="button"
-                    onClick={() => handleSelectMCQ('')}
-                    className="h-10 px-2 text-[11px] text-slate-400 hover:text-rose-400 transition ml-1"
-                    title="Kosongkan jawaban untuk nomor ini"
-                  >
-                    Hapus
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Mode Isian Singkat / Uraian Singkat */}
-            {answerMode === 'short' && (
-              <div className="flex items-center gap-2 w-full sm:w-72">
-                <input
-                  type="text"
-                  placeholder="Ketik uraian/jawaban singkat di sini..."
-                  value={(answers[currentQ?.id] as string) || ''}
-                  onChange={e => handleInputShort(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 font-mono shadow-inner"
-                />
-                {answers[currentQ?.id] && (
-                  <button
-                    type="button"
-                    onClick={() => handleInputShort('')}
-                    className="text-xs text-slate-400 hover:text-rose-400 whitespace-nowrap"
-                  >
-                    Hapus
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Tipe Soal Benar / Salah (True / False) */}
-            {currentQ?.type === 'tf' && (
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleSelectTF('BENAR')}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition border flex items-center gap-1.5 active:scale-95 ${
-                    answers[currentQ.id] === 'BENAR'
-                      ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow ring-2 ring-emerald-400/50 font-black'
-                      : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                  }`}
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>BENAR</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSelectTF('SALAH')}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition border flex items-center gap-1.5 active:scale-95 ${
-                    answers[currentQ.id] === 'SALAH'
-                      ? 'bg-rose-500 text-white border-rose-400 shadow ring-2 ring-rose-400/50 font-black'
-                      : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                  }`}
-                >
-                  <X className="w-3.5 h-3.5" />
-                  <span>SALAH</span>
-                </button>
-              </div>
-            )}
-
-            {/* Tipe Soal Checkbox (Multi-select) */}
-            {currentQ?.type === 'checkbox' && (
-              <div className="flex items-center gap-1.5">
-                {availableOptions.map(opt => {
-                  const arr = Array.isArray(answers[currentQ.id]) ? (answers[currentQ.id] as string[]) : [];
-                  const isChecked = arr.includes(opt);
-                  return (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => handleToggleCheckbox(opt)}
-                      className={`min-w-[38px] h-9 px-2 rounded-xl text-xs font-bold transition border flex items-center justify-center ${
-                        isChecked
-                          ? 'bg-indigo-600 text-white border-indigo-400 ring-2 ring-indigo-400/50'
-                          : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
-                      }`}
-                    >
-                      {opt}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
-            <button
-              onClick={() => setCurrentIndex(i => Math.max(0, i - 1))}
-              disabled={currentIndex === 0}
-              className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 flex items-center gap-1"
-            >
-              <ChevronLeft className="w-4 h-4" />
-              <span>Sebelumnya</span>
-            </button>
-
-            <button
-              onClick={toggleDoubt}
-              className={`px-3 py-2 text-xs font-semibold rounded-xl border transition ${
-                doubtMap[currentQ?.id]
-                  ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
-                  : 'bg-slate-900 text-amber-300 border-slate-700 hover:bg-slate-800'
-              }`}
-            >
-              <span>Ragu-Ragu</span>
-            </button>
-
-            {currentIndex < questions.length - 1 ? (
-              <button
-                onClick={() => setCurrentIndex(i => Math.min(questions.length - 1, i + 1))}
-                className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs rounded-xl transition flex items-center gap-1 shadow"
-              >
-                <span>Selanjutnya</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            ) : (
+            <div className="space-y-3 pt-2 border-t border-slate-200 text-[11px]">
               <button
                 onClick={() => setShowFinishConfirm(true)}
-                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl transition flex items-center gap-1.5 shadow"
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition shadow-xs flex items-center justify-center gap-1.5"
               >
-                <Send className="w-3.5 h-3.5" />
-                <span>Kirim Jawaban</span>
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Selesai &amp; Kirim Ujian</span>
               </button>
-            )}
-          </div>
-
-        </div>
-      </main>
-
-      {/* RIGHT SIDEBAR (COLLAPSIBLE / DAPAT DITUTUP AGAR TAMPILAN SOAL LEBAR) */}
-      {isSidebarOpen && (
-        <aside className="w-full lg:w-72 bg-slate-900 rounded-xl border border-slate-800 p-4 flex flex-col justify-between gap-4 shrink-0 shadow-lg">
-          <div className="space-y-4">
-            
-            <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-white truncate">{studentName}</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-[10px] text-sky-400 bg-sky-950 border border-sky-800 px-1.5 py-0.5 rounded">
-                    {selectedKelas}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsSidebarOpen(false)}
-                    className="text-slate-500 hover:text-white p-0.5 rounded hover:bg-slate-800 transition"
-                    title="Tutup panel soal agar layar soal lebih lebar"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-              <div className="text-[11px] text-slate-400">
-                No: <strong className="text-slate-300">{noPeserta}</strong> · {selectedMapel}
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-800">
-                <div className="bg-slate-900 border border-slate-800 p-2 rounded-lg text-center">
-                  <div className="text-[10px] text-slate-400 flex items-center justify-center gap-1">
-                    <Clock className="w-3 h-3 text-amber-400" />
-                    <span>Sisa:</span>
-                  </div>
-                  <div className="font-mono font-bold text-xs text-amber-400 mt-0.5">
-                    {formatTime(timeRemaining)}
-                  </div>
-                </div>
-
-                <div className="bg-slate-900 border border-slate-800 p-2 rounded-lg text-center">
-                  <div className="text-[10px] text-slate-400 flex items-center justify-center gap-1">
-                    <ShieldAlert className="w-3 h-3 text-rose-400" />
-                    <span>Langgar:</span>
-                  </div>
-                  <div className="font-mono font-bold text-xs text-rose-400 mt-0.5">
-                    {violationsCount} / {config.maxViolations}
-                  </div>
-                </div>
-              </div>
             </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs pb-1 border-b border-slate-800">
-                <span className="font-bold text-slate-300">Peta Soal Ujian</span>
-                <span className="text-[11px] font-mono text-slate-400">
-                  {answeredCount} / {questions.length} Terjawab
-                </span>
-              </div>
-
-              <div className="grid grid-cols-5 gap-2 max-h-[320px] overflow-y-auto pr-1">
-                {questions.map((q, idx) => {
-                  const isCurrent = idx === currentIndex;
-                  const hasAnswer = answers[q.id] !== undefined && answers[q.id] !== '' && (!Array.isArray(answers[q.id]) || (answers[q.id] as string[]).length > 0);
-                  const isDoubt = doubtMap[q.id];
-
-                  let bgClass = 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700';
-                  if (isDoubt) bgClass = 'bg-amber-500 text-slate-950 font-bold border-amber-400';
-                  else if (hasAnswer) bgClass = 'bg-emerald-600 text-white font-bold border-emerald-500';
-
-                  if (isCurrent) bgClass += ' ring-2 ring-sky-400 ring-offset-2 ring-offset-slate-900 font-black';
-
-                  return (
-                    <button
-                      key={q.id || idx}
-                      onClick={() => setCurrentIndex(idx)}
-                      className={`h-9 rounded-xl text-xs font-bold border transition flex items-center justify-center ${bgClass}`}
-                      title={`Pindah ke Soal No. ${idx + 1}`}
-                    >
-                      {idx + 1}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-          </div>
-
-          <div className="space-y-3 pt-2 border-t border-slate-800 text-[11px]">
-            <button
-              onClick={() => setShowFinishConfirm(true)}
-              className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl transition shadow flex items-center justify-center gap-1.5"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Selesai & Kirim Ujian</span>
-            </button>
-          </div>
-        </aside>
-      )}
-
+          </aside>
+        )}
       </div>
 
       {/* CONFIRMATION MODAL */}
       {showFinishConfirm && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl text-white">
-            <div className="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto text-xl">
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl text-slate-900">
+            <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto border border-emerald-200">
               <Send className="w-6 h-6" />
             </div>
             <div className="space-y-1">
-              <h3 className="font-bold text-base">Kirim Lembar Jawaban Sekarang?</h3>
-              <p className="text-xs text-slate-400">
-                Jawaban Anda akan dikoreksi di server {config.schoolName} dan nilainya dihitung otomatis.
+              <h3 className="font-bold text-base text-slate-900">Kirim Lembar Jawaban Sekarang?</h3>
+              <p className="text-xs text-slate-600">
+                Jawaban Anda akan dikoreksi otomatis untuk {config.schoolName}.
               </p>
             </div>
 
-            <div className="p-3 bg-slate-950 rounded-xl grid grid-cols-2 gap-2 text-xs">
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl grid grid-cols-2 gap-2 text-xs">
               <div>
-                <span className="text-slate-400 text-[10px]">Terjawab:</span>
-                <div className="font-bold text-emerald-400 text-sm">{answeredCount} Soal</div>
+                <span className="text-slate-500 text-[10px]">Terjawab:</span>
+                <div className="font-bold text-emerald-700 text-sm font-mono tabular-nums">{answeredCount} Soal</div>
               </div>
               <div>
-                <span className="text-slate-400 text-[10px]">Belum Diisi:</span>
-                <div className="font-bold text-slate-300 text-sm">{questions.length - answeredCount} Soal</div>
+                <span className="text-slate-500 text-[10px]">Belum Diisi:</span>
+                <div className="font-bold text-slate-700 text-sm font-mono tabular-nums">{questions.length - answeredCount} Soal</div>
               </div>
             </div>
 
             <div className="flex gap-2 pt-2">
               <button
                 onClick={() => setShowFinishConfirm(false)}
-                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl border border-slate-700"
+                className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl border border-slate-300"
               >
                 Periksa Kembali
               </button>
               <button
                 onClick={() => submitExamToServer(false)}
-                className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl shadow"
+                className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow"
               >
                 Ya, Kirim Sekarang
               </button>
@@ -1675,32 +1919,32 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
 
       {/* ANTI-CHEATING WARNING MODAL */}
       {showWarningModal && (
-        <div className="fixed inset-0 bg-rose-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-rose-500/50 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl text-white">
-            <div className="w-12 h-12 bg-rose-500/20 text-rose-400 rounded-2xl flex items-center justify-center mx-auto text-xl">
+        <div className="fixed inset-0 bg-rose-950/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-rose-300 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl text-slate-900">
+            <div className="w-12 h-12 bg-rose-50 text-rose-600 rounded-2xl flex items-center justify-center mx-auto border border-rose-200">
               <AlertTriangle className="w-6 h-6" />
             </div>
             <div className="space-y-1">
-              <h3 className="font-bold text-base text-rose-400 uppercase tracking-wide">Peringatan Anti-Kecurangan!</h3>
-              <p className="text-xs text-slate-300 leading-relaxed">
+              <h3 className="font-extrabold text-base text-rose-700 uppercase tracking-wide">Peringatan Anti-Kecurangan!</h3>
+              <p className="text-xs text-slate-700 leading-relaxed">
                 {warningMessage}
               </p>
             </div>
 
-            <div className="p-3 bg-rose-950/40 border border-rose-800 rounded-xl text-xs space-y-1">
-              <div className="font-bold text-rose-300">
-                Jumlah Pelanggaran: <span className="font-mono text-base text-rose-400">{violationsCount}</span> / {config.maxViolations}
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs space-y-1">
+              <div className="font-bold text-rose-800">
+                Jumlah Pelanggaran: <span className="font-mono text-base text-rose-700">{violationsCount}</span> / {config.maxViolations}
               </div>
-              <p className="text-[10px] text-slate-400">
-                Jika mencapai batas toleransi ({config.maxViolations}x), ujian Anda akan di-submit paksa oleh server.
+              <p className="text-[10px] text-rose-700">
+                Jika mencapai batas toleransi ({config.maxViolations}x), ujian Anda akan disubmit otomatis.
               </p>
             </div>
 
             <button
               onClick={() => setShowWarningModal(false)}
-              className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl shadow"
+              className="w-full py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl shadow"
             >
-              Saya Mengerti & Kembali Ujian
+              Saya Mengerti &amp; Kembali Ujian
             </button>
           </div>
         </div>

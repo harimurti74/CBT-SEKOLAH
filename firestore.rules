@@ -60,11 +60,13 @@ service cloud.firestore {
         'examId', 'ownerUid', 'appTitle', 'schoolName', 'schoolLevel',
         'token', 'gdriveUrl', 'mapels', 'kelas', 'durationMinutes',
         'maxViolations', 'shuffleQuestions', 'verificationMode',
+        'scheduleEnabled', 'scheduleStart', 'scheduleEnd',
         'rosterCount', 'subjectsCount', 'imagesCount', 'createdAt', 'updatedAt'
       ]) && data.keys().hasOnly([
         'examId', 'ownerUid', 'appTitle', 'schoolName', 'schoolLevel',
         'token', 'gdriveUrl', 'mapels', 'kelas', 'durationMinutes',
         'maxViolations', 'shuffleQuestions', 'verificationMode',
+        'scheduleEnabled', 'scheduleStart', 'scheduleEnd',
         'rosterCount', 'subjectsCount', 'imagesCount', 'createdAt', 'updatedAt'
       ])
       && data.examId == examId
@@ -81,6 +83,9 @@ service cloud.firestore {
       && data.maxViolations is number && data.maxViolations >= 0 && data.maxViolations <= 50
       && data.shuffleQuestions is bool
       && data.verificationMode is string && data.verificationMode in ['crosscheck', 'manual']
+      && data.scheduleEnabled is bool
+      && data.scheduleStart is string && data.scheduleStart.size() <= 40
+      && data.scheduleEnd is string && data.scheduleEnd.size() <= 40
       && data.rosterCount is number && data.rosterCount >= 0 && data.rosterCount <= 10000
       && data.subjectsCount is number && data.subjectsCount >= 0 && data.subjectsCount <= 100
       && data.imagesCount is number && data.imagesCount >= 0 && data.imagesCount <= 2000
@@ -207,7 +212,8 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'appTitle', 'schoolName', 'schoolLevel', 'token', 'gdriveUrl',
           'mapels', 'kelas', 'durationMinutes', 'maxViolations',
-          'shuffleQuestions', 'verificationMode', 'rosterCount',
+          'shuffleQuestions', 'verificationMode', 'scheduleEnabled',
+          'scheduleStart', 'scheduleEnd', 'rosterCount',
           'subjectsCount', 'imagesCount', 'updatedAt'
         ]);
       allow delete: if isValidId(examId) && isExamAdmin(examId);

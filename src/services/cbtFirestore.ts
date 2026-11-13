@@ -125,6 +125,19 @@ export async function fetchExamFromCloud(examId: string): Promise<CloudExamDoc |
   }
 }
 
+export async function fetchMyExamsFromCloud(): Promise<CloudExamDoc[]> {
+  const user = auth.currentUser;
+  if (!user) return [];
+  const path = 'exams';
+  try {
+    const q = query(collection(db, 'exams'), where('ownerUid', '==', user.uid));
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data() as CloudExamDoc);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.LIST, path);
+  }
+}
+
 export async function upsertExamToCloud(
   examId: string,
   config: AppConfig,
@@ -162,6 +175,9 @@ export async function upsertExamToCloud(
       maxViolations: Math.min(50, Math.max(0, Number(config.maxViolations) ?? 3)),
       shuffleQuestions: Boolean(config.shuffleQuestions),
       verificationMode: config.verificationMode === 'manual' ? 'manual' : 'crosscheck',
+      scheduleEnabled: Boolean(config.scheduleEnabled),
+      scheduleStart: String(config.scheduleStart || '').trim().slice(0, 40),
+      scheduleEnd: String(config.scheduleEnd || '').trim().slice(0, 40),
       rosterCount: counts?.rosterCount ?? existingData?.rosterCount ?? 0,
       subjectsCount: counts?.subjectsCount ?? existingData?.subjectsCount ?? 0,
       imagesCount: counts?.imagesCount ?? existingData?.imagesCount ?? 0,

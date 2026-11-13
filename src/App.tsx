@@ -20,7 +20,10 @@ const DEFAULT_CONFIG: AppConfig = {
   durationMinutes: 90,
   maxViolations: 3,
   shuffleQuestions: true,
-  verificationMode: 'crosscheck'
+  verificationMode: 'crosscheck',
+  scheduleEnabled: false,
+  scheduleStart: '',
+  scheduleEnd: ''
 };
 
 const sanitizeConfig = (raw: any): AppConfig => {
@@ -46,7 +49,10 @@ const sanitizeConfig = (raw: any): AppConfig => {
       ? raw.kelas.filter((k: any) => typeof k === 'string' && k.trim().length > 0)
       : DEFAULT_CONFIG.kelas,
     schoolLevel: raw.schoolLevel || 'SMA/MA/SMK/MAK',
-    verificationMode: raw.verificationMode || 'crosscheck'
+    verificationMode: raw.verificationMode || 'crosscheck',
+    scheduleEnabled: Boolean(raw.scheduleEnabled),
+    scheduleStart: typeof raw.scheduleStart === 'string' ? raw.scheduleStart : '',
+    scheduleEnd: typeof raw.scheduleEnd === 'string' ? raw.scheduleEnd : ''
   };
 };
 
@@ -84,21 +90,21 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#0c1322] text-white flex items-center justify-center p-4">
-          <div className="bg-[#131b2e] border border-slate-700 rounded-2xl max-w-md w-full p-6 text-center space-y-4 shadow-2xl">
-            <div className="w-12 h-12 bg-amber-500/20 text-amber-400 rounded-2xl flex items-center justify-center mx-auto text-xl font-bold border border-amber-500/30">
-              ⚠️
+        <div className="min-h-screen bg-[#f4f8fc] text-slate-900 flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 text-center space-y-4 shadow-xl">
+            <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center mx-auto text-xl font-bold border border-amber-200">
+              !
             </div>
-            <h3 className="font-bold text-base text-slate-100">Memulihkan Sesi Laman Ujian CBT</h3>
-            <p className="text-xs text-slate-400 leading-relaxed">
+            <h3 className="font-bold text-base text-slate-900">Memulihkan Sesi Laman Ujian CBT</h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
               Terjadi penyesuaian cache pada peramban Anda. Silakan klik tombol di bawah untuk membuka kembali laman ujian dengan konfigurasi bersih:
             </p>
             <div className="pt-2 flex flex-col gap-2">
               <button
                 onClick={this.handleReset}
-                className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-xl shadow transition"
+                className="w-full py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow transition"
               >
-                Segarkan & Masuk Laman Ujian
+                Segarkan &amp; Masuk Laman Ujian
               </button>
             </div>
           </div>
@@ -239,7 +245,7 @@ function CbtApp() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0c1322] text-slate-100 antialiased font-sans select-none">
+    <div className="min-h-screen flex flex-col bg-[#f4f8fc] text-slate-900 antialiased font-sans select-none">
       {/* Top Navbar */}
       <Navbar 
         appTitle={config.appTitle}
@@ -264,7 +270,7 @@ function CbtApp() {
         )}
 
         {activeTab === 'consultation' && !isStudentOnlyMode && (
-          <div className="flex-1 overflow-y-auto bg-slate-100 text-slate-900">
+          <div className="flex-1 overflow-y-auto bg-[#f4f8fc] text-slate-900">
             <ArchitecturalConsultation 
               onNavigateTab={(tab) => {
                 if (tab === 'exam') setActiveTab('student-login');
@@ -277,51 +283,49 @@ function CbtApp() {
         )}
 
         {activeTab === 'simulator' && !isStudentOnlyMode && (
-          <div className="flex-1 overflow-y-auto bg-slate-100 text-slate-900">
+          <div className="flex-1 overflow-y-auto bg-[#f4f8fc] text-slate-900">
             <LoadSimulator />
           </div>
         )}
 
         {activeTab === 'security' && !isStudentOnlyMode && (
-          <div className="flex-1 overflow-y-auto bg-slate-100 text-slate-900">
+          <div className="flex-1 overflow-y-auto bg-[#f4f8fc] text-slate-900">
             <SecurityInspector />
           </div>
         )}
       </main>
 
       {/* Bottom System Bar */}
-      <footer className="bg-slate-950 border-t border-slate-800 px-4 py-2 text-[11px] text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-2 shrink-0">
+      <footer className="bg-white border-t border-slate-200 px-4 py-2 text-[11px] text-slate-600 flex flex-col sm:flex-row items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2">
-          <span className="font-bold text-sky-400">{config.schoolName}</span>
-          <span>·</span>
-          <span>{config.appTitle}</span>
+          <span className="font-bold text-sky-700">{config.schoolName}</span>
+          <span className="text-slate-300">|</span>
+          <span className="font-medium text-slate-700">{config.appTitle}</span>
         </div>
 
         {isStudentOnlyMode ? (
-          /* Locked Student Footer (No Token or Download Link Exposed) */
           <div className="flex items-center gap-3 text-slate-500">
-            <span className="text-emerald-400 font-mono text-[10px]">● Server Ujian Terhubung</span>
-            <span>·</span>
+            <span className="text-emerald-700 font-semibold text-[10px]">Server Ujian Terhubung</span>
+            <span className="text-slate-300">|</span>
             <span className="text-[10px]">Slide CBT Anti-Kecurangan</span>
-            <span>·</span>
+            <span className="text-slate-300">|</span>
             <button 
               onClick={handleProctorUnlock}
-              className="text-[10px] text-slate-600 hover:text-slate-400 transition"
+              className="text-[10px] text-slate-500 hover:text-slate-800 transition"
               title="Akses Darurat Proktor / Pengawas Ruang"
             >
               [Proktor]
             </button>
           </div>
         ) : (
-          /* Normal / Admin Footer */
           <div className="flex items-center gap-3 text-slate-500">
-            <span>Token: <strong className="text-emerald-400 font-mono">{config.token}</strong></span>
-            <span>·</span>
+            <span>Token: <strong className="text-emerald-700 font-mono">{config.token}</strong></span>
+            <span className="text-slate-300">|</span>
             <a 
               href="/assets/aistudio/aplikasi_simulasi_ujian_slide_ppt_pdf_html_91b85c62.html" 
               target="_blank" 
               rel="noreferrer" 
-              className="text-sky-400 hover:underline font-semibold"
+              className="text-sky-600 hover:text-sky-700 hover:underline font-semibold"
             >
               Download File HTML Standalone (.html)
             </a>

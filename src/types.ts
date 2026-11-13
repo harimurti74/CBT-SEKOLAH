@@ -13,12 +13,15 @@ export interface AppConfig {
   maxViolations: number;
   shuffleQuestions: boolean;
   verificationMode?: 'crosscheck' | 'manual';
+  scheduleEnabled?: boolean;
+  scheduleStart?: string;
+  scheduleEnd?: string;
 }
 
 export interface ClientQuestion {
   id: number;
   subject: string;
-  type: 'mcq' | 'tf' | 'short' | 'checkbox' | 'slide_image';
+  type: 'mcq' | 'tf' | 'short' | 'checkbox' | 'slide_image' | 'matrix';
   typeTitle: string;
   questionCode: string;
   assignedVariantCode?: string; // 'A' | 'B' | 'C' | 'D'
@@ -26,6 +29,8 @@ export interface ClientQuestion {
   imageUrl?: string; // Base64 data URL or uploaded image URL
   questionText: string;
   options: string[];
+  statementLabels?: string[]; // e.g. ['A', 'B', 'C', 'D', 'E'] for matrix Tepat/Tidak Tepat
+  statementTexts?: string[]; // optional statement text
   maxPoints: number;
   passage?: string;
   // NOTE: 'key' is NEVER sent to client (Zero Knowledge)

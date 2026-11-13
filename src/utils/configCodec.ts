@@ -13,7 +13,10 @@ export function encodeConfigForUrl(cfg: AppConfig): string {
       d: cfg.durationMinutes,
       x: cfg.maxViolations,
       q: cfg.shuffleQuestions,
-      tk: cfg.token
+      tk: cfg.token,
+      se: Boolean(cfg.scheduleEnabled),
+      ss: cfg.scheduleStart || '',
+      snd: cfg.scheduleEnd || ''
     };
     const json = JSON.stringify(compact);
     const bytes = new TextEncoder().encode(json);
@@ -54,6 +57,9 @@ export function decodeConfigFromUrl(encoded: string | null): Partial<AppConfig> 
     if (typeof c.q === 'boolean') result.shuffleQuestions = c.q;
     if (typeof c.tk === 'string' && c.tk.trim()) result.token = c.tk;
     if (typeof c.g === 'string') result.gdriveUrl = c.g;
+    if (typeof c.se === 'boolean') result.scheduleEnabled = c.se;
+    if (typeof c.ss === 'string') result.scheduleStart = c.ss;
+    if (typeof c.snd === 'string') result.scheduleEnd = c.snd;
     return result;
   } catch (e) {
     return null;

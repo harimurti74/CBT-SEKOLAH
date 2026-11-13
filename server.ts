@@ -3,6 +3,13 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as XLSX from 'xlsx';
+import {
+  formatScheduleId,
+  getTypeTitle,
+  gradeQuestionAnswer,
+  normalizeQuestionType,
+  parseMatrixKeys
+} from './src/utils/questionGrading';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +26,9 @@ interface AppConfig {
   maxViolations: number;
   shuffleQuestions: boolean;
   verificationMode?: 'crosscheck' | 'manual';
+  scheduleEnabled?: boolean;
+  scheduleStart?: string;
+  scheduleEnd?: string;
 }
 
 interface QuestionVariant {
@@ -31,11 +41,12 @@ interface QuestionVariant {
 interface ServerQuestion {
   id: number;
   subject: string;
-  type: 'mcq' | 'tf' | 'short' | 'checkbox';
+  type: 'mcq' | 'tf' | 'short' | 'checkbox' | 'slide_image' | 'matrix';
   typeTitle: string;
   questionCode: string; // e.g. 'INGGRIS_1'
   questionText?: string;
   options?: string[];
+  statementLabels?: string[];
   maxPoints: number;
   passage?: string;
   imageUrl?: string; // Optional image data URL or image path
@@ -83,7 +94,10 @@ let APP_CONFIG: AppConfig = {
   durationMinutes: 90,
   maxViolations: 3,
   shuffleQuestions: true,
-  verificationMode: 'crosscheck'
+  verificationMode: 'crosscheck',
+  scheduleEnabled: false,
+  scheduleStart: '',
+  scheduleEnd: ''
 };
 
 // ==========================================
@@ -322,6 +336,9 @@ async function startServer() {
     if (maxViolations !== undefined) APP_CONFIG.maxViolations = Number(maxViolations);
     if (shuffleQuestions !== undefined) APP_CONFIG.shuffleQuestions = Boolean(shuffleQuestions);
     if (req.body.verificationMode) APP_CONFIG.verificationMode = req.body.verificationMode === 'manual' ? 'manual' : 'crosscheck';
+    if (req.body.scheduleEnabled !== undefined) APP_CONFIG.scheduleEnabled = Boolean(req.body.scheduleEnabled);
+    if (req.body.scheduleStart !== undefined) APP_CONFIG.scheduleStart = String(req.body.scheduleStart || '').trim();
+    if (req.body.scheduleEnd !== undefined) APP_CONFIG.scheduleEnd = String(req.body.scheduleEnd || '').trim();
 
     res.json({
       success: true,
@@ -432,16 +449,24 @@ async function startServer() {
 
       subjectsFound.add(subject);
 
+      const rawType = String(row.TIPE || row.Tipe || row.tipe || row.TYPE || row.Type || 'PG').trim();
+      const qType = normalizeQuestionType(rawType);
+      const qTypeTitle = getTypeTitle(qType);
+
       const baseCode = String(row.SOAL || row.Soal || `${subject}_${num}`).trim();
       const codeA = String(row.A || row['a'] || '').trim();
       const codeB = String(row.B || row['b'] || '').trim();
       const codeC = String(row.C || row['c'] || '').trim();
       const codeD = String(row.D || row['d'] || '').trim();
 
-      const keyA = String(row['KUNCI A'] || row['Kunci A'] || row['kunci a'] || '').trim().toUpperCase();
-      const keyB = String(row['KUNCI B'] || row['Kunci B'] || row['kunci b'] || '').trim().toUpperCase();
-      const keyC = String(row['KUNCI C'] || row['Kunci C'] || row['kunci c'] || '').trim().toUpperCase();
-      const keyD = String(row['KUNCI D'] || row['kunci D'] || row['kunci d'] || '').trim().toUpperCase();
+      const keyA = String(row['KUNCI A'] || row['Kunci A'] || row['kunci a'] || row.KUNCI || row.kunci || 'A').trim().toUpperCase();
+      const keyB = String(row['KUNCI B'] || row['Kunci B'] || row['kunci b'] || keyA).trim().toUpperCase();
+      const keyC = String(row['KUNCI C'] || row['Kunci C'] || row['kunci c'] || keyA).trim().toUpperCase();
+      const keyD = String(row['KUNCI D'] || row['kunci D'] || row['kunci d'] || keyA).trim().toUpperCase();
+
+      const matrixCount = qType === 'matrix' ? parseMatrixKeys(keyA).length : 0;
+      const statementLabels = qType === 'matrix' ? ['A', 'B', 'C', 'D', 'E'].slice(0, Math.min(5, Math.max(1, matrixCount))) : undefined;
+      const customText = String(row.TEKS_SOAL || row['Teks Soal'] || '').trim();
 
       // Rule 2.d: If A/B/C/D have file names, it is multi-variant!
       if (codeA || codeB || codeC || codeD) {
@@ -454,23 +479,25 @@ async function startServer() {
         newBank.push({
           id: num,
           subject,
-          type: 'mcq',
-          typeTitle: 'Pilihan Ganda (Varian A/B/C/D)',
+          type: qType,
+          typeTitle: qTypeTitle,
           questionCode: baseCode,
-          questionText: `Soal #${num} (${subject}) - Varian Acak Terkunci`,
+          questionText: customText,
+          statementLabels,
           maxPoints: 20,
           variants
         });
       } else {
         // Rule 2.d.1: A/B/C/D empty means single type question!
-        const singleKey = keyA || String(row.KUNCI || row.kunci || 'A').trim().toUpperCase();
+        const singleKey = keyA || 'A';
         newBank.push({
           id: num,
           subject,
-          type: 'mcq',
-          typeTitle: 'Pilihan Ganda (Tipe Tunggal)',
+          type: qType,
+          typeTitle: qTypeTitle,
           questionCode: baseCode,
-          questionText: `Soal #${num} (${subject})`,
+          questionText: customText,
+          statementLabels,
           key: singleKey,
           maxPoints: 20
         });
@@ -583,6 +610,30 @@ async function startServer() {
     if (APP_CONFIG.token.toUpperCase() !== String(token).trim().toUpperCase()) {
       res.status(401).json({ success: false, message: 'TOKEN Ujian Salah! Minta Token resmi ke Guru/Pengawas.' });
       return;
+    }
+
+    if (APP_CONFIG.scheduleEnabled) {
+      const nowMs = Date.now();
+      if (APP_CONFIG.scheduleStart) {
+        const startMs = new Date(APP_CONFIG.scheduleStart).getTime();
+        if (!Number.isNaN(startMs) && nowMs < startMs) {
+          res.status(403).json({
+            success: false,
+            message: `Ujian belum dibuka. Jadwal pengerjaan dimulai pada ${formatScheduleId(APP_CONFIG.scheduleStart)}.`
+          });
+          return;
+        }
+      }
+      if (APP_CONFIG.scheduleEnd) {
+        const endMs = new Date(APP_CONFIG.scheduleEnd).getTime();
+        if (!Number.isNaN(endMs) && nowMs > endMs) {
+          res.status(403).json({
+            success: false,
+            message: `Waktu pengerjaan ujian telah berakhir pada ${formatScheduleId(APP_CONFIG.scheduleEnd)}. Hubungi guru/pengawas.`
+          });
+          return;
+        }
+      }
     }
 
     const cleanName = String(studentName).trim().toUpperCase();
@@ -721,8 +772,9 @@ async function startServer() {
         assignedVariantCode: activeVariantCode,
         slideFileName: activeFileName,
         imageUrl: matchedImageUrl,
-        questionText: `Soal #${q.id} - ${q.subject}`,
+        questionText: q.questionText && !/^Soal\s*#\d+/i.test(q.questionText) ? q.questionText : '',
         options: q.options || [],
+        statementLabels: q.statementLabels,
         maxPoints: q.maxPoints,
         passage: q.passage
         // 'key' is COMPLETELY ABSENT!
@@ -782,39 +834,9 @@ async function startServer() {
         correctKey = variantObj.key;
       }
 
-      let scoreEarned = 0;
-      let isCorrect = false;
-
-      if (q.type === 'mcq' || q.type === 'tf') {
-        if (userAns && String(userAns).toUpperCase() === String(correctKey).toUpperCase()) {
-          scoreEarned = maxPts;
-          isCorrect = true;
-        }
-      } else if (q.type === 'short') {
-        if (userAns && typeof userAns === 'string') {
-          const sim = computeSimilarity(userAns, correctKey as string);
-          if (sim >= 0.8) {
-            scoreEarned = maxPts;
-            isCorrect = true;
-          } else if (sim >= 0.5) {
-            scoreEarned = Math.round(maxPts * sim);
-          }
-        }
-      } else if (q.type === 'checkbox') {
-        const correctKeys = Array.isArray(correctKey) ? correctKey : [correctKey];
-        const userKeys = Array.isArray(userAns) ? userAns : [];
-        if (userKeys.length > 0) {
-          let matches = 0;
-          userKeys.forEach(k => {
-            if (correctKeys.includes(k)) matches++;
-            else matches--;
-          });
-          matches = Math.max(0, matches);
-          const ratio = matches / correctKeys.length;
-          scoreEarned = Math.round(maxPts * ratio);
-          if (ratio >= 0.99) isCorrect = true;
-        }
-      }
+      const graded = gradeQuestionAnswer(q.type, userAns, correctKey, maxPts);
+      const scoreEarned = graded.scoreEarned;
+      const isCorrect = graded.isCorrect;
 
       totalScoreEarned += scoreEarned;
 
