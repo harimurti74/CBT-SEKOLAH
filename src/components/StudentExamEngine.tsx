@@ -124,7 +124,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     totalEarned: number;
     totalMax: number;
     breakdown: ScoreBreakdownItem[];
-    gdriveDestination: string;
+    storageDestination: string;
   } | null>(null);
 
   // Handle Student Login (Hybrid: Server API with Client-Side Fallback for GitHub Pages & Vercel)
@@ -537,7 +537,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
             totalEarned: data.totalEarned,
             totalMax: data.totalMax,
             breakdown: data.breakdown,
-            gdriveDestination: data.gdriveDestination
+            storageDestination: 'Rekap hasil ujian langsung tersedia di menu Administrasi Guru (Unduh Excel .xlsx).'
           });
           setIsSubmitted(true);
           submitted = true;
@@ -644,7 +644,9 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         totalEarned,
         totalMax,
         breakdown,
-        gdriveDestination: config.gdriveUrl || 'Folder Google Drive Sekolah'
+        storageDestination: activeExamId
+          ? 'Tersimpan otomatis ke Cloud Database Ujian dan siap diunduh guru ke Excel (.xlsx).'
+          : 'Tersimpan ke rekap hasil ujian dan siap diunduh guru ke Excel (.xlsx).'
       });
       setIsSubmitted(true);
     }
@@ -999,8 +1001,8 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-800 text-emerald-300 flex items-start gap-3">
             <CloudCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
             <div className="text-xs space-y-1">
-              <div className="font-bold text-white">Tersimpan ke Folder Google Drive Sekolah:</div>
-              <div className="font-mono text-[11px] text-emerald-300 break-all">{finalResult.gdriveDestination}</div>
+              <div className="font-bold text-white">Jawaban & Nilai Tersimpan Aman di Database Sekolah:</div>
+              <div className="text-[11px] text-emerald-300">{finalResult.storageDestination}</div>
             </div>
           </div>
 

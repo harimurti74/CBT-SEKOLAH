@@ -25,7 +25,6 @@ import {
   Upload, 
   Key, 
   FileSpreadsheet, 
-  Code, 
   RotateCcw, 
   Search, 
   Copy, 
@@ -63,7 +62,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   const [verificationMode, setVerificationMode] = useState<'crosscheck' | 'manual'>(config.verificationMode || 'crosscheck');
   const [mapelsRaw, setMapelsRaw] = useState(config.mapels.join(', '));
   const [kelasRaw, setKelasRaw] = useState(config.kelas.join(', '));
-  const [gdriveUrl, setGdriveUrl] = useState(config.gdriveUrl);
   const [durationMinutes, setDurationMinutes] = useState(config.durationMinutes);
   const [maxViolations, setMaxViolations] = useState(config.maxViolations);
   const [activeToken, setActiveToken] = useState(config.token);
@@ -84,7 +82,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   const [toastMessage, setToastMessage] = useState<string>('');
 
   // Modals State
-  const [showAppsScriptModal, setShowAppsScriptModal] = useState(false);
   const [showConfigKeysModal, setShowConfigKeysModal] = useState(false);
   const [showUploadExcelModal, setShowUploadExcelModal] = useState(false);
   const [showUploadQuestionsModal, setShowUploadQuestionsModal] = useState(false);
@@ -117,7 +114,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     setVerificationMode(config.verificationMode || 'crosscheck');
     setMapelsRaw(config.mapels.join(', '));
     setKelasRaw(config.kelas.join(', '));
-    setGdriveUrl(config.gdriveUrl);
     setDurationMinutes(config.durationMinutes);
     setMaxViolations(config.maxViolations);
     setActiveToken(config.token);
@@ -520,44 +516,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     showToast('Pilihan Mapel & Kelas Siswa berhasil diperbarui!');
   };
 
-  const handleSaveGdriveUrl = async () => {
-    const updated: AppConfig = {
-      ...config,
-      examId,
-      gdriveUrl: gdriveUrl.trim()
-    };
-
-    onUpdateConfig(updated);
-    try {
-      localStorage.setItem('cbt_app_config', JSON.stringify(updated));
-    } catch (e) {}
-
-    if (auth.currentUser) {
-      try {
-        await upsertExamToCloud(examId, updated);
-      } catch (_) {}
-    }
-
-    try {
-      const res = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updated)
-      });
-      const ct = res.headers.get('content-type') || '';
-      if (ct.includes('application/json')) {
-        const data = await res.json();
-        if (data && data.success && data.config) {
-          onUpdateConfig({ ...data.config, examId });
-        }
-      }
-    } catch (err) {
-      console.warn(err);
-    }
-
-    showToast('Link Google Drive Penyimpanan Data berhasil disimpan!');
-  };
-
   // Generate Link Khusus Siswa (Terkunci ke Laman Siswa saja: mode=student + membawa examId & konfigurasi ujian guru)
   const handleGenerateLink = async () => {
     const parsedMapels = mapelsRaw.split(',').map(s => s.trim()).filter(Boolean);
@@ -572,7 +530,7 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       verificationMode,
       mapels: parsedMapels.length > 0 ? parsedMapels : config.mapels,
       kelas: parsedKelas.length > 0 ? parsedKelas : config.kelas,
-      gdriveUrl: gdriveUrl.trim(),
+      gdriveUrl: '',
       durationMinutes,
       maxViolations,
       token: activeToken,
@@ -1480,14 +1438,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
               <span>CLEAR CACHE UJIAN</span>
             </button>
 
-            <button
-              onClick={() => setShowAppsScriptModal(true)}
-              className="bg-teal-600 hover:bg-teal-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow"
-            >
-              <Code className="w-3.5 h-3.5" />
-              <span>KODE SCRIPT GDRIVE</span>
-            </button>
-
             {questionsSummary.length === 0 && (
               <button
                 onClick={handleLoadDemoData}
@@ -1764,37 +1714,14 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
             </div>
           </div>
 
-          {/* CARD 2: Link Unik Guru & Integration (Poin 1: Default Semua Mapel & Semua Kelas) */}
+          {/* CARD 2: Link Khusus Siswa & Pengaturan Ujian */}
           <div className="bg-[#131b2e] border border-slate-700/80 rounded-2xl p-5 shadow-lg space-y-4">
             <div className="flex items-center gap-2 text-amber-400 font-bold text-xs border-b border-slate-700/60 pb-2.5">
-              <span>Link Unik Guru & Integration</span>
-            </div>
-
-            {/* Link Google Drive */}
-            <div className="space-y-1">
-              <label className="text-[11px] font-semibold text-slate-300">
-                Link Google Drive Penyimpanan Data:
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={gdriveUrl}
-                  onChange={e => setGdriveUrl(e.target.value)}
-                  placeholder="https://drive.google.com/..."
-                  className="flex-1 bg-[#0a0f1d] border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-amber-300 focus:outline-none focus:border-amber-500"
-                />
-                <button
-                  type="button"
-                  onClick={handleSaveGdriveUrl}
-                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs rounded-xl border border-slate-600"
-                >
-                  Simpan
-                </button>
-              </div>
+              <span>Link Khusus Siswa & Pengaturan Ujian</span>
             </div>
 
             {/* POIN 1: Generator Link Siswa dengan Opsi "Semua Mapel" & "Semua Kelas" */}
-            <div className="space-y-2 pt-1 border-t border-slate-800">
+            <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-semibold text-slate-300">
                   Generate Link Siswa (Pilihan Default Universal):
@@ -2502,52 +2429,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
             <div className="flex justify-end">
               <button onClick={() => setShowConfigKeysModal(false)} className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-xl">
-                Tutup
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL 4: KODE GOOGLE APPS SCRIPT */}
-      {showAppsScriptModal && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-2xl text-white">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-sm text-emerald-400 flex items-center gap-2">
-                <Code className="w-4 h-4" />
-                <span>Kode Google Apps Script untuk Google Drive</span>
-              </h3>
-              <button onClick={() => setShowAppsScriptModal(false)} className="text-slate-400 hover:text-white">✕</button>
-            </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              Salin kode berikut ke Google Spreadsheet Anda (menu <strong>Extensions &gt; Apps Script</strong>), lalu Deploy sebagai Web App:
-            </p>
-
-            <pre className="p-3 bg-slate-950 border border-slate-800 rounded-xl font-mono text-[11px] text-emerald-300 overflow-x-auto select-all leading-relaxed">
-{`function doPost(e) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  if (sheet.getLastRow() === 0) {
-    sheet.appendRow(["Waktu", "Nama", "No Peserta", "Kelas", "Mapel", "Paket", "Nilai", "Pelanggaran", "Status"]);
-  }
-  var d = JSON.parse(e.postData.contents);
-  sheet.appendRow([new Date(), d.studentName, d.noPeserta, d.className, d.subject, d.assignedPackage || "-", d.score, d.violationsCount, d.status]);
-  return ContentService.createTextOutput(JSON.stringify({ status: "success" }));
-}`}
-            </pre>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(`function doPost(e) {\n  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();\n  if (sheet.getLastRow() === 0) {\n    sheet.appendRow(["Waktu", "Nama", "No Peserta", "Kelas", "Mapel", "Paket", "Nilai", "Pelanggaran", "Status"]);\n  }\n  var d = JSON.parse(e.postData.contents);\n  sheet.appendRow([new Date(), d.studentName, d.noPeserta, d.className, d.subject, d.assignedPackage || "-", d.score, d.violationsCount, d.status]);\n  return ContentService.createTextOutput(JSON.stringify({ status: "success" }));\n}`);
-                  showToast('Kode Apps Script disalin ke clipboard!');
-                }}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow"
-              >
-                Salin Kode
-              </button>
-              <button onClick={() => setShowAppsScriptModal(false)} className="px-4 py-2 bg-slate-800 text-slate-300 text-xs rounded-xl">
                 Tutup
               </button>
             </div>

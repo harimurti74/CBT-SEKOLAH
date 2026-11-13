@@ -14,7 +14,7 @@ const DEFAULT_CONFIG: AppConfig = {
   schoolName: 'SMA Negeri 1 Wonogiri',
   schoolLevel: 'SMA/MA/SMK/MAK',
   token: 'CBT2026',
-  gdriveUrl: 'https://drive.google.com/drive/folders/1SMA_Teladan_CBT_Archive',
+  gdriveUrl: '',
   mapels: ['Bahasa Inggris', 'Biologi', 'Fisika', 'Matematika', 'Kimia', 'TIK'],
   kelas: ['X-1', 'X-2', 'XI-IPA-1', 'XI-IPA-2', 'XII-MIPA', '12A', '12B'],
   durationMinutes: 90,

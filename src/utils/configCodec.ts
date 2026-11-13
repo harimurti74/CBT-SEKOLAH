@@ -13,8 +13,7 @@ export function encodeConfigForUrl(cfg: AppConfig): string {
       d: cfg.durationMinutes,
       x: cfg.maxViolations,
       q: cfg.shuffleQuestions,
-      tk: cfg.token,
-      g: cfg.gdriveUrl
+      tk: cfg.token
     };
     const json = JSON.stringify(compact);
     const bytes = new TextEncoder().encode(json);

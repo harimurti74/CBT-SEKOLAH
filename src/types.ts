@@ -6,7 +6,7 @@ export interface AppConfig {
   schoolName: string;
   schoolLevel?: SchoolLevel;
   token: string;
-  gdriveUrl: string;
+  gdriveUrl?: string;
   mapels: string[];
   kelas: string[];
   durationMinutes: number;
@@ -55,7 +55,7 @@ export interface StudentSubmission {
   maxScore: number;
   percentage: number;
   status: 'Selesai' | 'Curang (Disubmit)' | 'Direset' | 'Sedang Mengerjakan';
-  syncedToGdrive: boolean;
+  syncedToGdrive?: boolean;
   gdriveSyncTime?: string;
 }
 
