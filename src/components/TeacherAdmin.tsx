@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { AppConfig, StudentSubmission, MasterStudent, SchoolLevel } from '../types';
+import { encodeConfigForUrl } from '../utils/configCodec';
 import { 
   Sliders, 
   Upload, 
@@ -351,8 +352,37 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     showToast('Link Google Drive Penyimpanan Data berhasil disimpan!');
   };
 
-  // Generate Link Khusus Siswa (Terkunci ke Laman Siswa saja: mode=student)
+  // Generate Link Khusus Siswa (Terkunci ke Laman Siswa saja: mode=student + membawa konfigurasi ujian guru)
   const handleGenerateLink = () => {
+    const parsedMapels = mapelsRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const parsedKelas = kelasRaw.split(',').map(s => s.trim()).filter(Boolean);
+
+    const latestConfig: AppConfig = {
+      ...config,
+      appTitle: appTitle.trim() || config.appTitle,
+      schoolName: schoolName.trim() || config.schoolName,
+      schoolLevel,
+      verificationMode,
+      mapels: parsedMapels.length > 0 ? parsedMapels : config.mapels,
+      kelas: parsedKelas.length > 0 ? parsedKelas : config.kelas,
+      gdriveUrl: gdriveUrl.trim(),
+      durationMinutes,
+      maxViolations,
+      token: activeToken,
+      shuffleQuestions
+    };
+
+    // Sinkronkan juga ke state & localStorage agar tampilan guru dan link siswa 100% sama
+    onUpdateConfig(latestConfig);
+    try {
+      localStorage.setItem('cbt_app_config', JSON.stringify(latestConfig));
+    } catch (e) {}
+    fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(latestConfig)
+    }).catch(() => {});
+
     const baseUrl = window.location.origin + window.location.pathname;
     const params = new URLSearchParams();
 
@@ -362,6 +392,11 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     if (linkMapel !== 'all') params.append('mapel', linkMapel);
     if (linkKelas !== 'all') params.append('kelas', linkKelas);
     params.append('token', activeToken);
+
+    const encodedCfg = encodeConfigForUrl(latestConfig);
+    if (encodedCfg) {
+      params.append('cfg', encodedCfg);
+    }
 
     const url = `${baseUrl}?${params.toString()}`;
     setGeneratedLink(url);

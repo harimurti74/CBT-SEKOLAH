@@ -6,6 +6,7 @@ import { TeacherAdmin } from './components/TeacherAdmin';
 import { ArchitecturalConsultation } from './components/ArchitecturalConsultation';
 import { LoadSimulator } from './components/LoadSimulator';
 import { SecurityInspector } from './components/SecurityInspector';
+import { decodeConfigFromUrl } from './utils/configCodec';
 
 const DEFAULT_CONFIG: AppConfig = {
   appTitle: 'SIMULASI UJIAN CBT SLIDE',
@@ -105,7 +106,22 @@ export default function App() {
 }
 
 function CbtApp() {
+  const [hasUrlConfig] = useState<boolean>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return !!decodeConfigFromUrl(params.get('cfg'));
+  });
+
   const [config, setConfig] = useState<AppConfig>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlCfg = decodeConfigFromUrl(params.get('cfg'));
+    if (urlCfg) {
+      const merged = sanitizeConfig(urlCfg);
+      try {
+        localStorage.setItem('cbt_app_config', JSON.stringify(merged));
+      } catch (e) {}
+      return merged;
+    }
+
     try {
       const saved = localStorage.getItem('cbt_app_config');
       if (saved) {
@@ -129,8 +145,10 @@ function CbtApp() {
       setActiveTab('student-login');
     }
 
-    fetchConfig();
-  }, []);
+    if (!hasUrlConfig) {
+      fetchConfig();
+    }
+  }, [hasUrlConfig]);
 
   const fetchConfig = async () => {
     try {
