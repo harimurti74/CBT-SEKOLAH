@@ -1,6 +1,7 @@
 export type SchoolLevel = 'SD/MI' | 'SMP/MTs' | 'SMA/MA/SMK/MAK' | 'SLB';
 
 export interface AppConfig {
+  examId?: string;
   appTitle: string;
   schoolName: string;
   schoolLevel?: SchoolLevel;

@@ -3,6 +3,7 @@ import { AppConfig } from '../types';
 export function encodeConfigForUrl(cfg: AppConfig): string {
   try {
     const compact = {
+      eid: cfg.examId || '',
       t: cfg.appTitle,
       s: cfg.schoolName,
       l: cfg.schoolLevel || 'SMA/MA/SMK/MAK',
@@ -42,6 +43,7 @@ export function decodeConfigFromUrl(encoded: string | null): Partial<AppConfig> 
     if (!c || typeof c !== 'object') return null;
 
     const result: Partial<AppConfig> = {};
+    if (typeof c.eid === 'string' && c.eid.trim()) result.examId = c.eid.trim();
     if (typeof c.t === 'string' && c.t.trim()) result.appTitle = c.t;
     if (typeof c.s === 'string' && c.s.trim()) result.schoolName = c.s;
     if (c.l) result.schoolLevel = c.l;

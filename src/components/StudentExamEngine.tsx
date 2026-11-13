@@ -5,6 +5,16 @@ import {
   ScoreBreakdownItem,
   StudentSubmission
 } from '../types';
+import {
+  createOrResumeStudentSubmissionInCloud,
+  fetchExamFromCloud,
+  fetchQuestionImagesForStudent,
+  fetchRosterStudentForCrosscheck,
+  fetchSubjectBankForStudent,
+  getOrCreateLocalExamId,
+  submitStudentExamToCloud,
+  toFirestoreId
+} from '../services/cbtFirestore';
 import { 
   BookOpen, 
   ZoomIn, 
@@ -90,6 +100,9 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
   // Exam State
   const [assignedPackage, setAssignedPackage] = useState<string>('Paket A');
   const [questions, setQuestions] = useState<ClientQuestion[]>([]);
+  const [gradingBank, setGradingBank] = useState<any[]>([]);
+  const [activeExamId, setActiveExamId] = useState<string>('');
+  const [activeSubmissionId, setActiveSubmissionId] = useState<string>('');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [doubtMap, setDoubtMap] = useState<Record<number, boolean>>({});
@@ -210,90 +223,190 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
       }
 
       // ==========================================
-      // 2. CLIENT-SIDE CBT ENGINE FALLBACK
-      // (Used when deployed on GitHub Pages, Vercel static, or offline)
+      // 2. CLOUD FIRESTORE + CLIENT CBT ENGINE
+      // (Used on Vercel, MS Edge, multi-device, and offline fallback)
       // ==========================================
-      console.log('Mengaktifkan Client Engine Fallback (Offline / GitHub Pages / Vercel Static)...');
+      const urlParams = new URLSearchParams(window.location.search);
+      const targetExamId = urlParams.get('exam') || config.examId || getOrCreateLocalExamId(config.schoolName);
+      setActiveExamId(targetExamId);
+
+      // Fetch latest exam metadata from Firestore (if synced by teacher)
+      let cloudExam = null;
+      try {
+        cloudExam = await fetchExamFromCloud(targetExamId);
+      } catch (_) {
+        cloudExam = null;
+      }
+
+      const effectiveToken = (cloudExam?.token || config.token || 'CBT2026').trim().toUpperCase();
+      const effectiveVerificationMode = cloudExam?.verificationMode || config.verificationMode || 'crosscheck';
+      const effectiveDuration = cloudExam?.durationMinutes || config.durationMinutes || 90;
+      const effectiveSchoolName = cloudExam?.schoolName || config.schoolName;
+      const effectiveShuffle = cloudExam?.shuffleQuestions ?? config.shuffleQuestions;
 
       // A. Verify TOKEN
-      const validToken = (config.token || 'CBT2026').trim().toUpperCase();
-      if (cleanToken !== validToken) {
-        setLoginError(`TOKEN Ujian Salah! Masukkan Token resmi dari guru pengawas (Contoh: ${validToken})`);
+      if (cleanToken !== effectiveToken) {
+        setLoginError(`TOKEN Ujian Salah! Masukkan Token resmi dari guru pengawas (Contoh: ${effectiveToken})`);
         setLoginLoading(false);
         return;
       }
 
-      // B. Cross-check with Master Student Excel if mode is 'crosscheck' (Requirement 6)
-      const isCrosscheckMode = config.verificationMode !== 'manual';
+      // B. Cross-check with Master Student Roster (Cloud Firestore first, fallback to localStorage)
+      const isCrosscheckMode = effectiveVerificationMode !== 'manual';
       let masterStudents: any[] = [];
       try {
         const rawMaster = localStorage.getItem('cbt_master_students');
         if (rawMaster) masterStudents = JSON.parse(rawMaster);
       } catch (_) {}
 
-      if (isCrosscheckMode && masterStudents.length > 0) {
-        const match = masterStudents.find((s: any) =>
-          String(s.noPeserta).trim().toLowerCase() === cleanNo.toLowerCase() &&
-          (String(s.name).toUpperCase().includes(cleanName) || cleanName.includes(String(s.name).toUpperCase()))
-        );
-
-        if (!match) {
-          setLoginError(`DATA SISWA TIDAK COCOK DI MASTER EXCEL!\nNama "${cleanName}" dengan No. Peserta "${cleanNo}" tidak terdaftar. Silakan kroscek dengan pengawas atau ubah mode ke 'Peserta Umum / Manual' di administrasi guru.`);
-          setLoginLoading(false);
-          return;
+      if (isCrosscheckMode) {
+        if (cloudExam && cloudExam.rosterCount > 0) {
+          const cloudStudent = await fetchRosterStudentForCrosscheck(targetExamId, cleanNo);
+          const nameMatches = cloudStudent && (
+            String(cloudStudent.name).toUpperCase().includes(cleanName) ||
+            cleanName.includes(String(cloudStudent.name).toUpperCase())
+          );
+          if (!nameMatches) {
+            setLoginError(`DATA SISWA TIDAK COCOK DI MASTER EXCEL!\nNama "${cleanName}" dengan No. Peserta "${cleanNo}" tidak terdaftar. Silakan kroscek dengan pengawas atau ubah mode ke 'Peserta Umum / Manual' di administrasi guru.`);
+            setLoginLoading(false);
+            return;
+          }
+        } else if (masterStudents.length > 0) {
+          const match = masterStudents.find((s: any) =>
+            String(s.noPeserta).trim().toLowerCase() === cleanNo.toLowerCase() &&
+            (String(s.name).toUpperCase().includes(cleanName) || cleanName.includes(String(s.name).toUpperCase()))
+          );
+          if (!match) {
+            setLoginError(`DATA SISWA TIDAK COCOK DI MASTER EXCEL!\nNama "${cleanName}" dengan No. Peserta "${cleanNo}" tidak terdaftar. Silakan kroscek dengan pengawas atau ubah mode ke 'Peserta Umum / Manual' di administrasi guru.`);
+            setLoginLoading(false);
+            return;
+          }
         }
       }
 
-      // C. Load Question Bank from localStorage
+      // C. Load Question Bank (Cloud Firestore first, fallback to localStorage)
+      let matchedQuestions: any[] = [];
+      try {
+        matchedQuestions = await fetchSubjectBankForStudent(targetExamId, cleanSubj);
+      } catch (_) {
+        matchedQuestions = [];
+      }
+
       let localBank: any[] = [];
       try {
         const rawBank = localStorage.getItem('cbt_question_bank');
         if (rawBank) localBank = JSON.parse(rawBank);
       } catch (_) {}
 
-      // Load Question Images repository
+      const targetSubj = cleanSubj.toUpperCase();
+      if (matchedQuestions.length === 0 && localBank.length > 0) {
+        matchedQuestions = localBank.filter((q: any) =>
+          String(q.subject || '').trim().toUpperCase() === targetSubj ||
+          String(q.subject || '').trim().toUpperCase() === 'SEMUA MAPEL' ||
+          String(q.subject || '').trim().toUpperCase() === 'UMUM'
+        );
+      }
+
+      if (matchedQuestions.length === 0) {
+        const availableSubjects = Array.from(new Set(localBank.map((q: any) => q.subject))).filter(Boolean);
+        if (availableSubjects.length > 0) {
+          setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru di menu Administrasi Guru.\n(Mapel yang sudah memiliki bank soal: ${availableSubjects.join(', ')})`);
+        } else {
+          setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru. Silakan buka menu "Administrasi Guru", pastikan sudah Login Google Guru (Cloud Sync), lalu unggah file soal di tab "UPLOAD TIPE DAN KUNCI SOAL".`);
+        }
+        setLoginLoading(false);
+        return;
+      }
+
+      // Deterministic or random variant selection ('A' | 'B' | 'C' | 'D')
+      const variantLetters = ['A', 'B', 'C', 'D'];
+      const chosenPkgCode = variantLetters[
+        Array.from(cleanNo).reduce((acc, ch) => acc + ch.charCodeAt(0), 0) % 4
+      ];
+
+      // D. Collect all image keys needed and fetch from Cloud Firestore + localStorage
       let imageRepo: Record<string, any> = {};
       try {
         const rawImgs = localStorage.getItem('cbt_question_images');
         if (rawImgs) imageRepo = JSON.parse(rawImgs);
       } catch (_) {}
 
-      // Filter questions matching selected mapel
-      const targetSubj = cleanSubj.toUpperCase();
-      let matchedQuestions = localBank.filter((q: any) => 
-        String(q.subject || '').trim().toUpperCase() === targetSubj ||
-        String(q.subject || '').trim().toUpperCase() === 'SEMUA MAPEL' ||
-        String(q.subject || '').trim().toUpperCase() === 'UMUM'
-      );
-
-      // If no questions found for this subject
-      if (matchedQuestions.length === 0) {
-        const availableSubjects = Array.from(new Set(localBank.map((q: any) => q.subject))).filter(Boolean);
-        if (availableSubjects.length > 0) {
-          setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru di menu Administrasi Guru.\n(Mapel yang sudah memiliki bank soal: ${availableSubjects.join(', ')})`);
-        } else {
-          setLoginError(`Bank soal untuk mata pelajaran "${cleanSubj}" belum diunggah oleh guru. Silakan buka menu "Administrasi Guru" dan unggah file soal di tab "UPLOAD TIPE DAN KUNCI SOAL".`);
-        }
-        setLoginLoading(false);
-        return;
-      }
-
-      // Secure Zero-Knowledge Sanitization for Client Engine
-      const sanitizedQuestions: ClientQuestion[] = matchedQuestions.map((q: any, idx: number) => {
+      const candidateImageKeys: string[] = [];
+      matchedQuestions.forEach((q: any, idx: number) => {
         const baseCode = q.questionCode || `${targetSubj}_${idx + 1}`;
-        const activeFileName = q.slideFileName || baseCode;
-        
-        // Lookup matched image from repository
-        const lookupKeys = [
+        const variantFile = q.variants?.[chosenPkgCode]?.fileName;
+        const activeFileName = variantFile || q.slideFileName || baseCode;
+        candidateImageKeys.push(
           activeFileName.toLowerCase().trim(),
           baseCode.toLowerCase().trim(),
           activeFileName.replace(/\.[^/.]+$/, '').toLowerCase().trim()
+        );
+      });
+
+      try {
+        const cloudImages = await fetchQuestionImagesForStudent(targetExamId, candidateImageKeys);
+        imageRepo = { ...imageRepo, ...cloudImages };
+      } catch (_) {}
+
+      // E. Create or Resume Student Submission in Cloud Firestore
+      let initialAnswers: Record<number, string | string[]> = {};
+      let initialViolations = 0;
+      let isResumingSession = false;
+
+      if (cloudExam?.ownerUid) {
+        try {
+          const subRes = await createOrResumeStudentSubmissionInCloud({
+            examId: targetExamId,
+            ownerUid: cloudExam.ownerUid,
+            token: effectiveToken,
+            schoolName: effectiveSchoolName,
+            studentName: cleanName,
+            noPeserta: cleanNo,
+            className: selectedKelas,
+            subject: cleanSubj,
+            assignedPackage: `Paket ${chosenPkgCode}`
+          });
+
+          if (subRes.blocked) {
+            setLoginError(subRes.message || 'Anda sudah menyelesaikan ujian ini.');
+            setLoginLoading(false);
+            return;
+          }
+
+          setActiveSubmissionId(subRes.submissionId);
+          if (subRes.isResuming) {
+            isResumingSession = true;
+            initialAnswers = subRes.savedAnswers || {};
+            initialViolations = subRes.violationsCount || 0;
+          }
+        } catch (err) {
+          console.warn('Cloud submission session fallback to local:', err);
+        }
+      }
+
+      // F. Store grading bank (kept separate from ClientQuestion UI state)
+      setGradingBank(matchedQuestions);
+
+      // G. Secure Zero-Knowledge Sanitization for Client Engine
+      const sanitizedQuestions: ClientQuestion[] = matchedQuestions.map((q: any, idx: number) => {
+        const baseCode = q.questionCode || `${targetSubj}_${idx + 1}`;
+        const activeVariant = q.variants?.[chosenPkgCode] ? chosenPkgCode : 'A';
+        const activeFileName = q.variants?.[activeVariant]?.fileName || q.slideFileName || baseCode;
+
+        const lookupKeys = [
+          activeFileName.toLowerCase().trim(),
+          toFirestoreId(activeFileName),
+          baseCode.toLowerCase().trim(),
+          toFirestoreId(baseCode),
+          activeFileName.replace(/\.[^/.]+$/, '').toLowerCase().trim()
         ];
-        let matchedImageUrl: string | undefined = undefined;
-        for (const k of lookupKeys) {
-          if (imageRepo[k]?.dataUrl) {
-            matchedImageUrl = imageRepo[k].dataUrl;
-            break;
+        let matchedImageUrl: string | undefined = q.imageUrl;
+        if (!matchedImageUrl) {
+          for (const k of lookupKeys) {
+            if (imageRepo[k]?.dataUrl) {
+              matchedImageUrl = imageRepo[k].dataUrl;
+              break;
+            }
           }
         }
 
@@ -303,22 +416,26 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
           type: q.type || 'mcq',
           typeTitle: q.typeTitle || 'Pilihan Ganda',
           questionCode: baseCode,
-          assignedVariantCode: 'A',
+          assignedVariantCode: activeVariant,
           slideFileName: activeFileName,
           imageUrl: matchedImageUrl,
           questionText: `Soal #${idx + 1} - ${cleanSubj}`,
           options: q.options || ['A', 'B', 'C', 'D', 'E'],
           maxPoints: q.maxPoints || 10,
           passage: q.passage
-          // 'key' is removed for security!
         };
       });
 
-      setQuestions(sanitizedQuestions);
-      setAssignedPackage('Paket A');
+      const finalQuestions = effectiveShuffle && !isResumingSession
+        ? [...sanitizedQuestions].sort(() => Math.random() - 0.5)
+        : sanitizedQuestions;
+
+      setQuestions(finalQuestions);
+      setAssignedPackage(`Paket ${chosenPkgCode}`);
+      setAnswers(initialAnswers);
+      setViolationsCount(initialViolations);
       setIsLoggedIn(true);
-      setTimeRemaining(config.durationMinutes * 60);
-      setViolationsCount(0);
+      setTimeRemaining(effectiveDuration * 60);
       setIsSubmitted(false);
       setFinalResult(null);
 
@@ -389,7 +506,7 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
     return () => clearInterval(interval);
   }, [isLoggedIn, isSubmitted]);
 
-  // Submit Exam (Hybrid: Server-Side Grading with Local Client Fallback)
+  // Submit Exam (Hybrid: Server-Side Grading -> Cloud Firestore + Local Evaluation)
   const submitExamToServer = async (isForced = false) => {
     setShowFinishConfirm(false);
     setShowWarningModal(false);
@@ -411,7 +528,8 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         })
       });
 
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         if (data && data.success) {
           setFinalResult({
@@ -426,27 +544,31 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         }
       }
     } catch (err) {
-      console.warn('Server submit unavailable, falling back to client evaluation:', err);
+      console.warn('Server submit unavailable, evaluating via Cloud/Client engine:', err);
     }
 
-    // Client-side grading fallback (for GitHub Pages / Vercel static)
+    // Cloud + Client-side grading (for Vercel static / MS Edge / cross-browser)
     if (!submitted) {
       let totalEarned = 0;
       let totalMax = 0;
       const breakdown: ScoreBreakdownItem[] = [];
 
-      let localBank: any[] = [];
-      try {
-        const raw = localStorage.getItem('cbt_question_bank');
-        if (raw) localBank = JSON.parse(raw);
-      } catch (_) {}
+      let evalBank: any[] = gradingBank;
+      if (!evalBank || evalBank.length === 0) {
+        try {
+          const raw = localStorage.getItem('cbt_question_bank');
+          if (raw) evalBank = JSON.parse(raw);
+        } catch (_) {}
+      }
 
       questions.forEach((q) => {
         const maxPts = q.maxPoints || 10;
         totalMax += maxPts;
 
-        const bankItem = localBank.find((b: any) => b.id === q.id && b.subject === q.subject);
-        const correctKey = bankItem?.key || bankItem?.variants?.[q.assignedVariantCode || 'A']?.key || 'A';
+        const bankItem = evalBank.find((b: any) => b.id === q.id && b.subject === q.subject)
+          || evalBank.find((b: any) => b.id === q.id);
+        const variantKey = bankItem?.variants?.[q.assignedVariantCode || 'A']?.key;
+        const correctKey = String(variantKey || bankItem?.key || 'A');
         const studentAns = answers[q.id];
 
         let isCorrect = false;
@@ -468,9 +590,29 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
 
       const percentage = totalMax > 0 ? Math.round((totalEarned / totalMax) * 100) : 0;
       const nowStr = new Date().toLocaleTimeString('id-ID');
+      const finalStatus = isForced ? 'Curang (Disubmit)' : 'Selesai';
+
+      if (activeExamId && activeSubmissionId) {
+        try {
+          await submitStudentExamToCloud({
+            examId: activeExamId,
+            submissionId: activeSubmissionId,
+            answers,
+            violationsCount,
+            submitTime: nowStr,
+            score: totalEarned,
+            maxScore: totalMax,
+            percentage,
+            status: finalStatus,
+            syncedToGdrive: false
+          });
+        } catch (err) {
+          console.warn('Cloud submission update warning:', err);
+        }
+      }
 
       const submissionRecord: StudentSubmission = {
-        id: `sub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: activeSubmissionId || `sub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         studentName: studentName.toUpperCase(),
         noPeserta,
         className: selectedKelas,
@@ -479,12 +621,12 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         assignedPackage,
         answers,
         violationsCount,
-        startTime: new Date().toLocaleTimeString('id-ID'),
+        startTime: nowStr,
         submitTime: nowStr,
         score: totalEarned,
         maxScore: totalMax,
         percentage,
-        status: isForced ? 'Curang (Disubmit)' : 'Selesai',
+        status: finalStatus,
         syncedToGdrive: false
       };
 
@@ -492,8 +634,9 @@ export const StudentExamEngine: React.FC<Props> = ({ config }) => {
         let existingSubs: StudentSubmission[] = [];
         const raw = localStorage.getItem('cbt_submissions');
         if (raw) existingSubs = JSON.parse(raw);
-        existingSubs.unshift(submissionRecord);
-        localStorage.setItem('cbt_submissions', JSON.stringify(existingSubs));
+        const filtered = existingSubs.filter(s => s.id !== submissionRecord.id);
+        filtered.unshift(submissionRecord);
+        localStorage.setItem('cbt_submissions', JSON.stringify(filtered));
       } catch (_) {}
 
       setFinalResult({

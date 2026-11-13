@@ -1,0 +1,326 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedEmail() {
+      return isVerifiedUser() && request.auth.token.email == 'batharakresna@yahoo.co.id';
+    }
+
+    function isBootstrappedAdmin() {
+      return isBootstrappedEmail() || (
+        isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function examExists(examId) {
+      return exists(/databases/$(database)/documents/exams/$(examId));
+    }
+
+    function examData(examId) {
+      return get(/databases/$(database)/documents/exams/$(examId)).data;
+    }
+
+    function isExamOwner(examId) {
+      return isVerifiedUser() && examExists(examId) && examData(examId).ownerUid == request.auth.uid;
+    }
+
+    function isExamAdmin(examId) {
+      return isBootstrappedAdmin() || isExamOwner(examId);
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidExam(data, examId) {
+      return data.keys().hasAll([
+        'examId', 'ownerUid', 'appTitle', 'schoolName', 'schoolLevel',
+        'token', 'gdriveUrl', 'mapels', 'kelas', 'durationMinutes',
+        'maxViolations', 'shuffleQuestions', 'verificationMode',
+        'rosterCount', 'subjectsCount', 'imagesCount', 'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'examId', 'ownerUid', 'appTitle', 'schoolName', 'schoolLevel',
+        'token', 'gdriveUrl', 'mapels', 'kelas', 'durationMinutes',
+        'maxViolations', 'shuffleQuestions', 'verificationMode',
+        'rosterCount', 'subjectsCount', 'imagesCount', 'createdAt', 'updatedAt'
+      ])
+      && data.examId == examId
+      && isValidId(data.examId)
+      && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128
+      && data.appTitle is string && data.appTitle.size() >= 1 && data.appTitle.size() <= 200
+      && data.schoolName is string && data.schoolName.size() >= 1 && data.schoolName.size() <= 200
+      && data.schoolLevel is string && data.schoolLevel in ['SD/MI', 'SMP/MTs', 'SMA/MA/SMK/MAK', 'SLB']
+      && data.token is string && data.token.size() >= 1 && data.token.size() <= 32
+      && data.gdriveUrl is string && data.gdriveUrl.size() <= 500
+      && data.mapels is list && data.mapels.size() >= 1 && data.mapels.size() <= 50 && data.mapels[0] is string
+      && data.kelas is list && data.kelas.size() >= 1 && data.kelas.size() <= 100 && data.kelas[0] is string
+      && data.durationMinutes is number && data.durationMinutes >= 1 && data.durationMinutes <= 600
+      && data.maxViolations is number && data.maxViolations >= 0 && data.maxViolations <= 50
+      && data.shuffleQuestions is bool
+      && data.verificationMode is string && data.verificationMode in ['crosscheck', 'manual']
+      && data.rosterCount is number && data.rosterCount >= 0 && data.rosterCount <= 10000
+      && data.subjectsCount is number && data.subjectsCount >= 0 && data.subjectsCount <= 100
+      && data.imagesCount is number && data.imagesCount >= 0 && data.imagesCount <= 2000
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidSubjectBank(data, examId, subjectId) {
+      return data.keys().hasAll([
+        'examId', 'subjectId', 'subjectName', 'ownerUid', 'questions', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'examId', 'subjectId', 'subjectName', 'ownerUid', 'questions', 'updatedAt'
+      ])
+      && data.examId == examId
+      && data.subjectId == subjectId
+      && data.subjectName is string && data.subjectName.size() >= 1 && data.subjectName.size() <= 128
+      && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128
+      && data.questions is list && data.questions.size() >= 1 && data.questions.size() <= 250 && data.questions[0] is map
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidQuestionImage(data, examId, imageId) {
+      return data.keys().hasAll([
+        'examId', 'imageId', 'name', 'cleanName', 'type', 'sizeKb', 'dataUrl', 'ownerUid', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'examId', 'imageId', 'name', 'cleanName', 'type', 'sizeKb', 'dataUrl', 'ownerUid', 'updatedAt'
+      ])
+      && data.examId == examId
+      && data.imageId == imageId
+      && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
+      && data.cleanName is string && data.cleanName.size() >= 1 && data.cleanName.size() <= 150
+      && data.type is string && data.type.size() >= 1 && data.type.size() <= 60
+      && data.sizeKb is number && data.sizeKb >= 0 && data.sizeKb <= 1024
+      && data.dataUrl is string && data.dataUrl.size() >= 1 && data.dataUrl.size() <= 950000
+      && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidRosterStudent(data, examId, rosterId) {
+      return data.keys().hasAll([
+        'examId', 'rosterId', 'no', 'name', 'noPeserta', 'className', 'subject', 'ownerUid', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'examId', 'rosterId', 'no', 'name', 'noPeserta', 'className', 'subject', 'ownerUid', 'updatedAt'
+      ])
+      && data.examId == examId
+      && data.rosterId == rosterId
+      && data.no is number && data.no >= 0 && data.no <= 50000
+      && data.name is string && data.name.size() >= 1 && data.name.size() <= 150
+      && data.noPeserta is string && data.noPeserta.size() >= 1 && data.noPeserta.size() <= 64
+      && data.className is string && data.className.size() >= 1 && data.className.size() <= 64
+      && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 128
+      && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidSubmission(data, examId, submissionId) {
+      return data.keys().hasAll([
+        'id', 'examId', 'ownerUid', 'token', 'schoolName', 'studentName',
+        'noPeserta', 'className', 'subject', 'assignedPackage', 'answers',
+        'violationsCount', 'startTime', 'submitTime', 'score', 'maxScore',
+        'percentage', 'status', 'syncedToGdrive', 'createdAt', 'updatedAt'
+      ]) && data.keys().hasOnly([
+        'id', 'examId', 'ownerUid', 'token', 'schoolName', 'studentName',
+        'noPeserta', 'className', 'subject', 'assignedPackage', 'answers',
+        'violationsCount', 'startTime', 'submitTime', 'score', 'maxScore',
+        'percentage', 'status', 'syncedToGdrive', 'createdAt', 'updatedAt'
+      ])
+      && data.id == submissionId
+      && data.examId == examId
+      && data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128
+      && data.token is string && data.token.size() >= 1 && data.token.size() <= 32
+      && data.schoolName is string && data.schoolName.size() >= 1 && data.schoolName.size() <= 200
+      && data.studentName is string && data.studentName.size() >= 1 && data.studentName.size() <= 150
+      && data.noPeserta is string && data.noPeserta.size() >= 1 && data.noPeserta.size() <= 64
+      && data.className is string && data.className.size() >= 1 && data.className.size() <= 64
+      && data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 128
+      && data.assignedPackage is string && data.assignedPackage.size() >= 1 && data.assignedPackage.size() <= 50
+      && data.answers is map && data.answers.keys().size() <= 250
+      && data.violationsCount is number && data.violationsCount >= 0 && data.violationsCount <= 100
+      && data.startTime is string && data.startTime.size() >= 1 && data.startTime.size() <= 64
+      && data.submitTime is string && data.submitTime.size() <= 64
+      && data.score is number && data.score >= 0 && data.score <= 100000
+      && data.maxScore is number && data.maxScore >= 0 && data.maxScore <= 100000
+      && data.percentage is number && data.percentage >= 0 && data.percentage <= 100
+      && data.status is string && data.status in ['Sedang Mengerjakan', 'Selesai', 'Curang (Disubmit)', 'Direset']
+      && data.syncedToGdrive is bool
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminUser(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && data.uid == uid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.createdAt is timestamp;
+    }
+
+    // 4. Admins Registry
+    match /admins/{uid} {
+      allow get: if isVerifiedUser() && isValidId(uid) && (request.auth.uid == uid || isBootstrappedEmail());
+      allow list: if isBootstrappedEmail();
+      allow create, update: if isBootstrappedEmail() && isValidId(uid) && isValidAdminUser(incoming(), uid);
+      allow delete: if isBootstrappedEmail() && isValidId(uid);
+    }
+
+    // 5. Exam Workspaces
+    match /exams/{examId} {
+      allow get: if isValidId(examId);
+      allow list: if isBootstrappedEmail() || (isVerifiedUser() && existing().ownerUid == request.auth.uid);
+      allow create: if isVerifiedUser()
+        && isValidId(examId)
+        && isValidExam(incoming(), examId)
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(examId)
+        && isValidExam(incoming(), examId)
+        && isExamAdmin(examId)
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().examId == existing().examId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'appTitle', 'schoolName', 'schoolLevel', 'token', 'gdriveUrl',
+          'mapels', 'kelas', 'durationMinutes', 'maxViolations',
+          'shuffleQuestions', 'verificationMode', 'rosterCount',
+          'subjectsCount', 'imagesCount', 'updatedAt'
+        ]);
+      allow delete: if isValidId(examId) && isExamAdmin(examId);
+
+      // 5a. Subject Question Banks
+      match /banks/{subjectId} {
+        allow get: if isValidId(examId) && isValidId(subjectId) && examExists(examId);
+        allow list: if isBootstrappedEmail() || (isVerifiedUser() && existing().ownerUid == request.auth.uid);
+        allow create: if isValidId(examId)
+          && isValidId(subjectId)
+          && isValidSubjectBank(incoming(), examId, subjectId)
+          && isExamAdmin(examId)
+          && incoming().ownerUid == examData(examId).ownerUid
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(examId)
+          && isValidId(subjectId)
+          && isValidSubjectBank(incoming(), examId, subjectId)
+          && isExamAdmin(examId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().examId == existing().examId
+          && incoming().subjectId == existing().subjectId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'subjectName', 'questions', 'updatedAt'
+          ]);
+        allow delete: if isValidId(examId) && isValidId(subjectId) && isExamAdmin(examId);
+      }
+
+      // 5b. Question Slide Images (JPG/PNG/WebP)
+      match /images/{imageId} {
+        allow get: if isValidId(examId) && isValidId(imageId) && examExists(examId);
+        allow list: if isBootstrappedEmail() || (isVerifiedUser() && existing().ownerUid == request.auth.uid);
+        allow create: if isValidId(examId)
+          && isValidId(imageId)
+          && isValidQuestionImage(incoming(), examId, imageId)
+          && isExamAdmin(examId)
+          && incoming().ownerUid == examData(examId).ownerUid
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(examId)
+          && isValidId(imageId)
+          && isValidQuestionImage(incoming(), examId, imageId)
+          && isExamAdmin(examId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().examId == existing().examId
+          && incoming().imageId == existing().imageId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'cleanName', 'type', 'sizeKb', 'dataUrl', 'updatedAt'
+          ]);
+        allow delete: if isValidId(examId) && isValidId(imageId) && isExamAdmin(examId);
+      }
+
+      // 5c. Master Student Roster (Get-only by exact participant ID for student crosscheck; list restricted to owner/admin)
+      match /roster/{rosterId} {
+        allow get: if isValidId(examId) && isValidId(rosterId) && examExists(examId);
+        allow list: if isBootstrappedEmail() || (isVerifiedUser() && existing().ownerUid == request.auth.uid);
+        allow create: if isValidId(examId)
+          && isValidId(rosterId)
+          && isValidRosterStudent(incoming(), examId, rosterId)
+          && isExamAdmin(examId)
+          && incoming().ownerUid == examData(examId).ownerUid
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(examId)
+          && isValidId(rosterId)
+          && isValidRosterStudent(incoming(), examId, rosterId)
+          && isExamAdmin(examId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().examId == existing().examId
+          && incoming().rosterId == existing().rosterId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'no', 'name', 'noPeserta', 'className', 'subject', 'updatedAt'
+          ]);
+        allow delete: if isValidId(examId) && isValidId(rosterId) && isExamAdmin(examId);
+      }
+
+      // 5d. Student Exam Sessions & Submissions
+      match /submissions/{submissionId} {
+        allow get: if isValidId(examId) && isValidId(submissionId) && examExists(examId);
+        allow list: if isBootstrappedEmail() || (isVerifiedUser() && existing().ownerUid == request.auth.uid);
+        allow create: if isValidId(examId)
+          && isValidId(submissionId)
+          && isValidSubmission(incoming(), examId, submissionId)
+          && examExists(examId)
+          && incoming().token == examData(examId).token
+          && incoming().ownerUid == examData(examId).ownerUid
+          && incoming().status == 'Sedang Mengerjakan'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(examId)
+          && isValidId(submissionId)
+          && isValidSubmission(incoming(), examId, submissionId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().examId == existing().examId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            (isExamAdmin(examId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+            (
+              existing().status == 'Sedang Mengerjakan'
+              && incoming().token == existing().token
+              && incoming().noPeserta == existing().noPeserta
+              && incoming().subject == existing().subject
+              && incoming().studentName == existing().studentName
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'answers', 'violationsCount', 'submitTime', 'score', 'maxScore',
+                'percentage', 'status', 'syncedToGdrive', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if isValidId(examId) && isValidId(submissionId) && isExamAdmin(examId);
+      }
+    }
+  }
+}

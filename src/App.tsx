@@ -7,6 +7,7 @@ import { ArchitecturalConsultation } from './components/ArchitecturalConsultatio
 import { LoadSimulator } from './components/LoadSimulator';
 import { SecurityInspector } from './components/SecurityInspector';
 import { decodeConfigFromUrl } from './utils/configCodec';
+import { fetchExamFromCloud, getOrCreateLocalExamId } from './services/cbtFirestore';
 
 const DEFAULT_CONFIG: AppConfig = {
   appTitle: 'SIMULASI UJIAN CBT SLIDE',
@@ -23,10 +24,21 @@ const DEFAULT_CONFIG: AppConfig = {
 };
 
 const sanitizeConfig = (raw: any): AppConfig => {
-  if (!raw || typeof raw !== 'object') return DEFAULT_CONFIG;
+  if (!raw || typeof raw !== 'object') {
+    return {
+      ...DEFAULT_CONFIG,
+      examId: getOrCreateLocalExamId(DEFAULT_CONFIG.schoolName)
+    };
+  }
+  const schoolName = typeof raw.schoolName === 'string' && raw.schoolName.trim()
+    ? raw.schoolName.trim()
+    : DEFAULT_CONFIG.schoolName;
   return {
     ...DEFAULT_CONFIG,
     ...raw,
+    examId: typeof raw.examId === 'string' && raw.examId.trim()
+      ? raw.examId.trim()
+      : getOrCreateLocalExamId(schoolName),
     mapels: Array.isArray(raw.mapels) && raw.mapels.length > 0 
       ? raw.mapels.filter((m: any) => typeof m === 'string' && m.trim().length > 0)
       : DEFAULT_CONFIG.mapels,
@@ -108,16 +120,21 @@ export default function App() {
 function CbtApp() {
   const [hasUrlConfig] = useState<boolean>(() => {
     const params = new URLSearchParams(window.location.search);
-    return !!decodeConfigFromUrl(params.get('cfg'));
+    return !!decodeConfigFromUrl(params.get('cfg')) || !!params.get('exam');
   });
 
   const [config, setConfig] = useState<AppConfig>(() => {
     const params = new URLSearchParams(window.location.search);
     const urlCfg = decodeConfigFromUrl(params.get('cfg'));
-    if (urlCfg) {
-      const merged = sanitizeConfig(urlCfg);
+    const paramExamId = params.get('exam');
+    if (urlCfg || paramExamId) {
+      const merged = sanitizeConfig({
+        ...(urlCfg || {}),
+        ...(paramExamId ? { examId: paramExamId } : {})
+      });
       try {
         localStorage.setItem('cbt_app_config', JSON.stringify(merged));
+        if (merged.examId) localStorage.setItem('cbt_exam_id', merged.examId);
       } catch (e) {}
       return merged;
     }
@@ -130,7 +147,7 @@ function CbtApp() {
     } catch (e) {
       console.warn('Failed to parse cached config:', e);
     }
-    return DEFAULT_CONFIG;
+    return sanitizeConfig(DEFAULT_CONFIG);
   });
 
   const [activeTab, setActiveTab] = useState<'student-login' | 'student-exam' | 'admin' | 'consultation' | 'simulator' | 'security'>('student-login');
@@ -145,6 +162,23 @@ function CbtApp() {
       setActiveTab('student-login');
     }
 
+    // Sync latest config from Cloud Firestore if examId exists
+    const targetExamId = params.get('exam') || config.examId;
+    if (targetExamId) {
+      fetchExamFromCloud(targetExamId)
+        .then((cloudExam) => {
+          if (cloudExam) {
+            const merged = sanitizeConfig({ ...config, ...cloudExam, examId: cloudExam.examId });
+            setConfig(merged);
+            try {
+              localStorage.setItem('cbt_app_config', JSON.stringify(merged));
+              localStorage.setItem('cbt_exam_id', merged.examId || targetExamId);
+            } catch (_) {}
+          }
+        })
+        .catch(() => {});
+    }
+
     if (!hasUrlConfig) {
       fetchConfig();
     }
@@ -153,10 +187,12 @@ function CbtApp() {
   const fetchConfig = async () => {
     try {
       const res = await fetch('/api/config');
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) return;
       const data = await res.json();
       if (data && data.success && data.config) {
         setConfig(prev => {
-          const merged = sanitizeConfig({ ...prev, ...data.config });
+          const merged = sanitizeConfig({ ...prev, ...data.config, examId: prev.examId });
           try {
             localStorage.setItem('cbt_app_config', JSON.stringify(merged));
           } catch (e) {}
@@ -169,9 +205,11 @@ function CbtApp() {
   };
 
   const handleUpdateConfig = (newConfig: AppConfig) => {
-    setConfig(newConfig);
+    const clean = sanitizeConfig(newConfig);
+    setConfig(clean);
     try {
-      localStorage.setItem('cbt_app_config', JSON.stringify(newConfig));
+      localStorage.setItem('cbt_app_config', JSON.stringify(clean));
+      if (clean.examId) localStorage.setItem('cbt_exam_id', clean.examId);
     } catch (e) {
       console.warn('Failed to save config to localStorage:', e);
     }

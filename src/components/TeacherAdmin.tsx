@@ -1,7 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
+import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { AppConfig, StudentSubmission, MasterStudent, SchoolLevel } from '../types';
 import { encodeConfigForUrl } from '../utils/configCodec';
+import { auth, googleProvider } from '../firebase';
+import {
+  clearCacheInCloud,
+  deleteImageFromCloud,
+  fetchAllImagesFromCloud,
+  fetchAllQuestionBanksFromCloud,
+  fetchExamFromCloud,
+  fetchRosterCountFromCloud,
+  fetchSubmissionsFromCloud,
+  getOrCreateLocalExamId,
+  resetAllSubmissionsInCloud,
+  resetStudentInCloud,
+  saveQuestionBankToCloud,
+  saveQuestionImagesToCloud,
+  saveRosterToCloud,
+  upsertExamToCloud
+} from '../services/cbtFirestore';
 import { 
   Sliders, 
   Upload, 
@@ -26,7 +44,10 @@ import {
   RefreshCw,
   FolderSync,
   Image as ImageIcon,
-  LogIn
+  LogIn,
+  Cloud,
+  CloudOff,
+  LogOut
 } from 'lucide-react';
 
 interface Props {
@@ -84,6 +105,11 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   const [previewQuestions, setPreviewQuestions] = useState<any[]>([]);
   const [uploadFileName, setUploadFileName] = useState('');
 
+  // Cloud Auth & Sync State
+  const [cloudUser, setCloudUser] = useState<User | null>(auth.currentUser);
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
+  const examId = config.examId || getOrCreateLocalExamId(config.schoolName);
+
   useEffect(() => {
     setAppTitle(config.appTitle);
     setSchoolName(config.schoolName);
@@ -103,6 +129,119 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     setTimeout(() => setToastMessage(''), 3500);
   };
 
+  const syncLocalDataToCloud = async (activeCfg: AppConfig = config) => {
+    if (!auth.currentUser) return;
+    setIsCloudSyncing(true);
+    const activeExamId = activeCfg.examId || getOrCreateLocalExamId(activeCfg.schoolName);
+    try {
+      await upsertExamToCloud(activeExamId, activeCfg);
+
+      let syncedParts: string[] = [];
+      try {
+        const rawBank = localStorage.getItem('cbt_question_bank');
+        if (rawBank) {
+          const parsedBank = JSON.parse(rawBank);
+          if (Array.isArray(parsedBank) && parsedBank.length > 0) {
+            await saveQuestionBankToCloud(activeExamId, activeCfg, parsedBank);
+            syncedParts.push(`${parsedBank.length} soal`);
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const rawImgs = localStorage.getItem('cbt_question_images');
+        if (rawImgs) {
+          const parsedImgs = JSON.parse(rawImgs);
+          const imgValues = Object.values(parsedImgs || {}) as any[];
+          if (imgValues.length > 0) {
+            await saveQuestionImagesToCloud(activeExamId, activeCfg, imgValues);
+            syncedParts.push(`${imgValues.length} gambar`);
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const rawMaster = localStorage.getItem('cbt_master_students');
+        if (rawMaster) {
+          const parsedMaster = JSON.parse(rawMaster);
+          if (Array.isArray(parsedMaster) && parsedMaster.length > 0) {
+            await saveRosterToCloud(activeExamId, activeCfg, parsedMaster);
+            syncedParts.push(`${parsedMaster.length} siswa`);
+          }
+        }
+      } catch (_) {}
+
+      if (syncedParts.length > 0) {
+        showToast(`Cloud Sync selesai: ${syncedParts.join(', ')} tersimpan ke Firestore!`);
+      } else {
+        showToast('Cloud Sync aktif! Pengaturan ujian terhubung ke Firestore.');
+      }
+    } catch (err) {
+      console.error('Cloud sync error:', err);
+      showToast('Gagal sinkronisasi ke Cloud Firestore. Periksa koneksi internet.');
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  };
+
+  const handleCloudGoogleSignIn = async () => {
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      setCloudUser(cred.user);
+      await syncLocalDataToCloud(config);
+      await fetchMasterDataSummary();
+      await fetchSubmissions();
+    } catch (err: any) {
+      console.error('Google Sign-In error:', err);
+      showToast('Login Google dibatalkan atau terblokir popup browser.');
+    }
+  };
+
+  const handleCloudSignOut = async () => {
+    try {
+      await signOut(auth);
+      setCloudUser(null);
+      showToast('Keluar dari akun Cloud Guru.');
+    } catch (_) {}
+  };
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      setCloudUser(user);
+      if (user) {
+        try {
+          const cloudExam = await fetchExamFromCloud(examId);
+          if (!cloudExam) {
+            await syncLocalDataToCloud(config);
+          }
+        } catch (_) {}
+        fetchMasterDataSummary();
+        fetchSubmissions();
+      }
+    });
+    return () => unsub();
+  }, [examId]);
+
+  const applySubmissionFiltersAndSort = (rawList: StudentSubmission[]) => {
+    let list = [...rawList];
+    if (activeClassFilter !== 'all') {
+      list = list.filter(s => s.className === activeClassFilter);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      list = list.filter(s =>
+        s.studentName.toLowerCase().includes(q) || s.noPeserta.toLowerCase().includes(q)
+      );
+    }
+    if (sortOption === 'name_asc') list.sort((a, b) => a.studentName.localeCompare(b.studentName));
+    else if (sortOption === 'name_desc') list.sort((a, b) => b.studentName.localeCompare(a.studentName));
+    else if (sortOption === 'no_asc') list.sort((a, b) => String(a.noPeserta).localeCompare(String(b.noPeserta), undefined, { numeric: true }));
+    else if (sortOption === 'no_desc') list.sort((a, b) => String(b.noPeserta).localeCompare(String(a.noPeserta), undefined, { numeric: true }));
+    else if (sortOption === 'score_desc') list.sort((a, b) => (b.percentage || 0) - (a.percentage || 0));
+    else if (sortOption === 'score_asc') list.sort((a, b) => (a.percentage || 0) - (b.percentage || 0));
+    return list;
+  };
+
   const fetchSubmissions = async () => {
     let serverOk = false;
     try {
@@ -112,7 +251,8 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       if (sortOption) params.append('sort', sortOption);
 
       const res = await fetch(`/api/admin/submissions?${params.toString()}`);
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         if (data.success && Array.isArray(data.submissions)) {
           setSubmissions(data.submissions);
@@ -123,22 +263,28 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       serverOk = false;
     }
 
+    if (!serverOk && auth.currentUser) {
+      try {
+        const cloudSubs = await fetchSubmissionsFromCloud(examId);
+        if (cloudSubs.length > 0) {
+          try {
+            localStorage.setItem('cbt_submissions', JSON.stringify(cloudSubs));
+          } catch (_) {}
+          setSubmissions(applySubmissionFiltersAndSort(cloudSubs));
+          return;
+        }
+      } catch (_) {}
+    }
+
     // Fallback to localStorage submissions if server is offline or empty
     if (!serverOk) {
       try {
         const raw = localStorage.getItem('cbt_submissions');
         if (raw) {
-          let list: StudentSubmission[] = JSON.parse(raw);
-          if (activeClassFilter !== 'all') {
-            list = list.filter(s => s.className === activeClassFilter);
-          }
-          if (searchQuery.trim()) {
-            const q = searchQuery.trim().toLowerCase();
-            list = list.filter(s => 
-              s.studentName.toLowerCase().includes(q) || s.noPeserta.toLowerCase().includes(q)
-            );
-          }
-          setSubmissions(list);
+          const list: StudentSubmission[] = JSON.parse(raw);
+          setSubmissions(applySubmissionFiltersAndSort(list));
+        } else {
+          setSubmissions([]);
         }
       } catch (_) {}
     }
@@ -146,60 +292,100 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
   const fetchMasterDataSummary = async () => {
     // 1. Master Students
+    let masterResolved = false;
     try {
       const resSt = await fetch('/api/admin/master-students');
-      if (resSt.ok) {
+      const ct = resSt.headers.get('content-type') || '';
+      if (resSt.ok && ct.includes('application/json')) {
         const dataSt = await resSt.json();
         if (dataSt.success) {
           setMasterStudentsCount(typeof dataSt.total === 'number' ? dataSt.total : (dataSt.students?.length || 0));
+          masterResolved = true;
         }
-      } else {
-        const raw = localStorage.getItem('cbt_master_students');
-        setMasterStudentsCount(raw ? JSON.parse(raw).length : 0);
       }
-    } catch (_) {
+    } catch (_) {}
+
+    if (!masterResolved && auth.currentUser) {
+      try {
+        const cloudCount = await fetchRosterCountFromCloud(examId);
+        if (cloudCount > 0) {
+          setMasterStudentsCount(cloudCount);
+          masterResolved = true;
+        }
+      } catch (_) {}
+    }
+
+    if (!masterResolved) {
       const raw = localStorage.getItem('cbt_master_students');
       setMasterStudentsCount(raw ? JSON.parse(raw).length : 0);
     }
 
     // 2. Questions Summary
+    let bankResolved = false;
     try {
       const resQ = await fetch('/api/admin/questions-summary');
-      if (resQ.ok) {
+      const ct = resQ.headers.get('content-type') || '';
+      if (resQ.ok && ct.includes('application/json')) {
         const dataQ = await resQ.json();
         if (dataQ.success) {
           setQuestionsSummary(Array.isArray(dataQ.questions) ? dataQ.questions : []);
+          bankResolved = true;
         }
-      } else {
-        const raw = localStorage.getItem('cbt_question_bank');
-        setQuestionsSummary(raw ? JSON.parse(raw) : []);
       }
-    } catch (_) {
+    } catch (_) {}
+
+    if (!bankResolved && auth.currentUser) {
+      try {
+        const cloudQuestions = await fetchAllQuestionBanksFromCloud(examId);
+        if (cloudQuestions.length > 0) {
+          setQuestionsSummary(cloudQuestions);
+          try {
+            localStorage.setItem('cbt_question_bank', JSON.stringify(cloudQuestions));
+          } catch (_) {}
+          bankResolved = true;
+        }
+      } catch (_) {}
+    }
+
+    if (!bankResolved) {
       const raw = localStorage.getItem('cbt_question_bank');
       setQuestionsSummary(raw ? JSON.parse(raw) : []);
     }
 
     // 3. Question Images
+    let imgResolved = false;
     try {
       const resImg = await fetch('/api/admin/question-images');
-      if (resImg.ok) {
+      const ct = resImg.headers.get('content-type') || '';
+      if (resImg.ok && ct.includes('application/json')) {
         const dataImg = await resImg.json();
         if (dataImg.success) {
           setQuestionImagesCount(dataImg.totalCount || 0);
           setQuestionImagesList(dataImg.images || []);
-        }
-      } else {
-        const raw = localStorage.getItem('cbt_question_images');
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          setQuestionImagesCount(Object.keys(parsed).length);
-          setQuestionImagesList(Object.values(parsed));
-        } else {
-          setQuestionImagesCount(0);
-          setQuestionImagesList([]);
+          imgResolved = true;
         }
       }
-    } catch (_) {
+    } catch (_) {}
+
+    if (!imgResolved && auth.currentUser) {
+      try {
+        const cloudImgs = await fetchAllImagesFromCloud(examId);
+        if (cloudImgs.length > 0) {
+          setQuestionImagesCount(cloudImgs.length);
+          setQuestionImagesList(cloudImgs);
+          try {
+            const imgMap: Record<string, any> = {};
+            cloudImgs.forEach((im: any) => {
+              if (im.cleanName) imgMap[String(im.cleanName).toLowerCase()] = im;
+            });
+            localStorage.setItem('cbt_question_images', JSON.stringify(imgMap));
+          } catch (_) {}
+          imgResolved = true;
+        }
+      } catch (_) {}
+    }
+
+    if (!imgResolved) {
       const raw = localStorage.getItem('cbt_question_images');
       if (raw) {
         const parsed = JSON.parse(raw);
@@ -226,41 +412,49 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
     const updated: AppConfig = {
       ...config,
+      examId,
       appTitle: cleanTitle,
       schoolName: cleanSchool,
       schoolLevel,
       verificationMode
     };
 
-    // 1. Instantly update parent state so UI changes immediately in all views
     onUpdateConfig(updated);
 
-    // 2. Persist to localStorage for client-side persistence (Vercel static / offline)
     try {
       localStorage.setItem('cbt_app_config', JSON.stringify(updated));
     } catch (e) {
       console.warn('localStorage error:', e);
     }
 
-    // 3. Sync with backend API
+    if (auth.currentUser) {
+      try {
+        await upsertExamToCloud(examId, updated);
+      } catch (err) {
+        console.warn('Cloud config save warning:', err);
+      }
+    }
+
     try {
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated)
       });
-      const data = await res.json();
-      if (data && data.success && data.config) {
-        onUpdateConfig(data.config);
-        try {
-          localStorage.setItem('cbt_app_config', JSON.stringify(data.config));
-        } catch (e) {}
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.success && data.config) {
+          onUpdateConfig({ ...data.config, examId });
+        }
       }
     } catch (err) {
-      console.warn('Server offline/static, running with local storage:', err);
+      console.warn('Server offline/static, running with local/cloud storage:', err);
     }
 
-    showToast('Identitas Ujian & Nama Sekolah berhasil disimpan!');
+    showToast(auth.currentUser
+      ? 'Identitas Ujian & Nama Sekolah tersimpan ke Cloud!'
+      : 'Identitas Ujian tersimpan di browser (Login Google Guru untuk Cloud Sync).');
   };
 
   // Save Dropdowns (Daftar Mapel & Daftar Kelas)
@@ -275,21 +469,19 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
     const updated: AppConfig = {
       ...config,
+      examId,
       mapels,
       kelas
     };
 
-    // 1. Instantly update parent state
     onUpdateConfig(updated);
 
-    // 2. Persist to localStorage
     try {
       localStorage.setItem('cbt_app_config', JSON.stringify(updated));
     } catch (e) {
       console.warn('localStorage error:', e);
     }
 
-    // 3. Sync local filter tabs & dropdown choices
     if (activeClassFilter !== 'all' && !kelas.includes(activeClassFilter)) {
       setActiveClassFilter('all');
     }
@@ -300,22 +492,29 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       setLinkKelas('all');
     }
 
-    // 4. Sync with backend API
+    if (auth.currentUser) {
+      try {
+        await upsertExamToCloud(examId, updated);
+      } catch (err) {
+        console.warn('Cloud dropdown save warning:', err);
+      }
+    }
+
     try {
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated)
       });
-      const data = await res.json();
-      if (data && data.success && data.config) {
-        onUpdateConfig(data.config);
-        try {
-          localStorage.setItem('cbt_app_config', JSON.stringify(data.config));
-        } catch (e) {}
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.success && data.config) {
+          onUpdateConfig({ ...data.config, examId });
+        }
       }
     } catch (err) {
-      console.warn('Server offline/static, running with local storage:', err);
+      console.warn('Server offline/static, running with local/cloud storage:', err);
     }
 
     showToast('Pilihan Mapel & Kelas Siswa berhasil diperbarui!');
@@ -324,6 +523,7 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   const handleSaveGdriveUrl = async () => {
     const updated: AppConfig = {
       ...config,
+      examId,
       gdriveUrl: gdriveUrl.trim()
     };
 
@@ -332,18 +532,24 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       localStorage.setItem('cbt_app_config', JSON.stringify(updated));
     } catch (e) {}
 
+    if (auth.currentUser) {
+      try {
+        await upsertExamToCloud(examId, updated);
+      } catch (_) {}
+    }
+
     try {
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated)
       });
-      const data = await res.json();
-      if (data && data.success && data.config) {
-        onUpdateConfig(data.config);
-        try {
-          localStorage.setItem('cbt_app_config', JSON.stringify(data.config));
-        } catch (e) {}
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.success && data.config) {
+          onUpdateConfig({ ...data.config, examId });
+        }
       }
     } catch (err) {
       console.warn(err);
@@ -352,13 +558,14 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     showToast('Link Google Drive Penyimpanan Data berhasil disimpan!');
   };
 
-  // Generate Link Khusus Siswa (Terkunci ke Laman Siswa saja: mode=student + membawa konfigurasi ujian guru)
-  const handleGenerateLink = () => {
+  // Generate Link Khusus Siswa (Terkunci ke Laman Siswa saja: mode=student + membawa examId & konfigurasi ujian guru)
+  const handleGenerateLink = async () => {
     const parsedMapels = mapelsRaw.split(',').map(s => s.trim()).filter(Boolean);
     const parsedKelas = kelasRaw.split(',').map(s => s.trim()).filter(Boolean);
 
     const latestConfig: AppConfig = {
       ...config,
+      examId,
       appTitle: appTitle.trim() || config.appTitle,
       schoolName: schoolName.trim() || config.schoolName,
       schoolLevel,
@@ -372,11 +579,17 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       shuffleQuestions
     };
 
-    // Sinkronkan juga ke state & localStorage agar tampilan guru dan link siswa 100% sama
     onUpdateConfig(latestConfig);
     try {
       localStorage.setItem('cbt_app_config', JSON.stringify(latestConfig));
     } catch (e) {}
+
+    if (auth.currentUser) {
+      try {
+        await upsertExamToCloud(examId, latestConfig);
+      } catch (_) {}
+    }
+
     fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -386,8 +599,8 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     const baseUrl = window.location.origin + window.location.pathname;
     const params = new URLSearchParams();
 
-    // Dedicated student mode (locks the interface for students)
     params.append('mode', 'student');
+    params.append('exam', examId);
 
     if (linkMapel !== 'all') params.append('mapel', linkMapel);
     if (linkKelas !== 'all') params.append('kelas', linkKelas);
@@ -406,7 +619,11 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     else if (linkMapel !== 'all') desc = `Link Khusus Siswa - Mapel ${linkMapel} (Semua Kelas)`;
     else if (linkKelas !== 'all') desc = `Link Khusus Siswa - Kelas ${linkKelas} (Semua Mapel)`;
 
-    showToast(`${desc} berhasil dibuat!`);
+    if (!auth.currentUser) {
+      showToast(`${desc} dibuat! Klik 'Login Google Guru' di atas agar soal bisa dibuka di MS Edge/perangkat lain.`);
+    } else {
+      showToast(`${desc} berhasil dibuat & tersinkron ke Cloud!`);
+    }
   };
 
   const handleCopyLink = () => {
@@ -425,6 +642,7 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
     const updated: AppConfig = {
       ...config,
+      examId,
       token: res
     };
 
@@ -433,18 +651,24 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       localStorage.setItem('cbt_app_config', JSON.stringify(updated));
     } catch (e) {}
 
+    if (auth.currentUser) {
+      try {
+        await upsertExamToCloud(examId, updated);
+      } catch (_) {}
+    }
+
     try {
       const postRes = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated)
       });
-      const data = await postRes.json();
-      if (data && data.success && data.config) {
-        onUpdateConfig(data.config);
-        try {
-          localStorage.setItem('cbt_app_config', JSON.stringify(data.config));
-        } catch (e) {}
+      const ct = postRes.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await postRes.json();
+        if (data && data.success && data.config) {
+          onUpdateConfig({ ...data.config, examId });
+        }
       }
     } catch (err) {
       console.warn(err);
@@ -459,6 +683,7 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
     const updated: AppConfig = {
       ...config,
+      examId,
       shuffleQuestions: nextVal
     };
 
@@ -467,18 +692,24 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       localStorage.setItem('cbt_app_config', JSON.stringify(updated));
     } catch (e) {}
 
+    if (auth.currentUser) {
+      try {
+        await upsertExamToCloud(examId, updated);
+      } catch (_) {}
+    }
+
     try {
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated)
       });
-      const data = await res.json();
-      if (data && data.success && data.config) {
-        onUpdateConfig(data.config);
-        try {
-          localStorage.setItem('cbt_app_config', JSON.stringify(data.config));
-        } catch (e) {}
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.success && data.config) {
+          onUpdateConfig({ ...data.config, examId });
+        }
       }
     } catch (err) {
       console.warn(err);
@@ -488,13 +719,11 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   };
 
   const confirmResetStudent = async (sub: StudentSubmission, resetType: 'login_only' | 'full_reset' = 'full_reset') => {
-    // 1. Update client-side state & localStorage immediately
     try {
       const raw = localStorage.getItem('cbt_submissions');
       if (raw) {
         const subs: StudentSubmission[] = JSON.parse(raw);
         if (resetType === 'login_only') {
-          // Keep submission data, just update status so student can log back in
           const updatedSubs = subs.map(s => {
             if (s.id === sub.id || s.noPeserta === sub.noPeserta) {
               return { ...s, status: 'Sedang Mengerjakan' as const };
@@ -503,7 +732,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
           });
           localStorage.setItem('cbt_submissions', JSON.stringify(updatedSubs));
         } else {
-          // Full reset: completely remove submission
           const filtered = subs.filter(s => s.id !== sub.id && s.noPeserta !== sub.noPeserta);
           localStorage.setItem('cbt_submissions', JSON.stringify(filtered));
         }
@@ -521,27 +749,35 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       setSubmissions(prev => prev.filter(s => s.id !== sub.id && s.noPeserta !== sub.noPeserta));
     }
 
-    // 2. Clear or update status on server
+    if (auth.currentUser) {
+      try {
+        await resetStudentInCloud(examId, sub.id, resetType);
+      } catch (err) {
+        console.warn('Cloud reset student warning:', err);
+      }
+    }
+
     try {
       const res = await fetch('/api/admin/reset-student', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ submissionId: sub.id, noPeserta: sub.noPeserta, resetType })
       });
-      if (res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
         const data = await res.json();
         showToast(data.message || (resetType === 'login_only' 
           ? `Reset Login berhasil: ${sub.studentName} dapat melanjutkan ujian!` 
           : `Reset Total berhasil: Seluruh data ${sub.studentName} dihapus.`));
       } else {
         showToast(resetType === 'login_only'
-          ? `Reset Login siswa ${sub.studentName} disimpan lokal.`
-          : `Sesi siswa ${sub.studentName} di-reset secara lokal.`);
+          ? `Reset Login berhasil: ${sub.studentName} dapat melanjutkan ujian!`
+          : `Reset Total berhasil: Data ${sub.studentName} dihapus.`);
       }
     } catch (err) {
       showToast(resetType === 'login_only'
-        ? `Reset Login siswa ${sub.studentName} disimpan lokal.`
-        : `Sesi siswa ${sub.studentName} di-reset secara lokal.`);
+        ? `Reset Login siswa ${sub.studentName} berhasil!`
+        : `Sesi siswa ${sub.studentName} di-reset total.`);
     }
 
     setStudentToReset(null);
@@ -549,7 +785,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   };
 
   const confirmResetAll = async () => {
-    // 1. Immediately wipe client-side submissions
     try {
       localStorage.removeItem('cbt_submissions');
       localStorage.removeItem('cbt_active_session');
@@ -558,14 +793,22 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
     setSubmissions([]);
 
-    // 2. Request backend reset
+    if (auth.currentUser) {
+      try {
+        await resetAllSubmissionsInCloud(examId);
+      } catch (err) {
+        console.warn('Cloud reset all warning:', err);
+      }
+    }
+
     try {
       const res = await fetch('/api/admin/reset-all', { method: 'POST' });
-      if (res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
         const data = await res.json();
         showToast(data.message || 'Seluruh sesi siswa berhasil di-reset!');
       } else {
-        showToast('Seluruh sesi siswa berhasil di-reset (lokal)!');
+        showToast('Seluruh sesi siswa berhasil di-reset!');
       }
     } catch (err) {
       showToast('Seluruh sesi peserta berhasil di-reset!');
@@ -653,7 +896,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   // REQUEST 2: CLEAR CACHE (Clean slate for new exam)
   // ==========================================
   const handleClearCache = async (target: 'all' | 'questions') => {
-    // 1. Immediately purge client browser cache & storages
     try {
       if (target === 'questions' || target === 'all') {
         localStorage.removeItem('cbt_question_bank');
@@ -674,19 +916,27 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       console.warn('Clear cache localStorage error:', e);
     }
 
-    // 2. Request server cache clearance
+    if (auth.currentUser) {
+      try {
+        await clearCacheInCloud(examId, config, target);
+      } catch (err) {
+        console.warn('Cloud clear cache warning:', err);
+      }
+    }
+
     try {
       const res = await fetch('/api/admin/clear-cache', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target })
       });
-      if (res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
         const data = await res.json();
         showToast(data.message || 'Cache ujian berhasil dibersihkan total!');
       } else {
         showToast(target === 'questions' 
-          ? 'Bank soal dan gambar di-reset secara lokal!' 
+          ? 'Bank soal dan gambar berhasil dibersihkan!' 
           : 'Semua cache data ujian dibersihkan total!');
       }
     } catch (err) {
@@ -700,19 +950,61 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     fetchSubmissions();
   };
 
-  // Demo Data Loader (Optional testing)
+  // Demo Data Loader (Works both in local server and static Vercel + Cloud Firestore)
   const handleLoadDemoData = async () => {
     try {
       const res = await fetch('/api/admin/load-demo-data', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        showToast(data.message);
-        fetchMasterDataSummary();
-        fetchSubmissions();
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data.success) {
+          showToast(data.message);
+          fetchMasterDataSummary();
+          fetchSubmissions();
+          return;
+        }
       }
-    } catch (err) {
-      showToast('Gagal memuat data demo');
+    } catch (_) {}
+
+    // Client + Cloud fallback for Vercel static hosting
+    const defaultSubject = (config.mapels?.[0] || 'TIK').toUpperCase();
+    const demoBank = Array.from({ length: 5 }, (_, idx) => ({
+      id: idx + 1,
+      subject: defaultSubject,
+      type: 'mcq',
+      typeTitle: 'Pilihan Ganda Demo',
+      questionCode: `${defaultSubject}_${idx + 1}`,
+      slideFileName: `${defaultSubject}_${idx + 1}`,
+      questionText: `Contoh Soal Demo #${idx + 1} - ${defaultSubject}`,
+      options: ['A', 'B', 'C', 'D', 'E'],
+      maxPoints: 20,
+      key: ['A', 'B', 'C', 'D', 'E'][idx % 5]
+    }));
+
+    const demoStudents: MasterStudent[] = [
+      { no: 1, name: 'ADI', noPeserta: '2026001', className: config.kelas?.[0] || '12A', subject: defaultSubject },
+      { no: 2, name: 'PAIMAN', noPeserta: '2026009', className: config.kelas?.[0] || '12A', subject: defaultSubject }
+    ];
+
+    try {
+      localStorage.setItem('cbt_question_bank', JSON.stringify(demoBank));
+      localStorage.setItem('cbt_master_students', JSON.stringify(demoStudents));
+      setQuestionsSummary(demoBank);
+      setMasterStudentsCount(demoStudents.length);
+    } catch (_) {}
+
+    if (auth.currentUser) {
+      setIsCloudSyncing(true);
+      try {
+        await saveQuestionBankToCloud(examId, config, demoBank);
+        await saveRosterToCloud(examId, config, demoStudents);
+      } finally {
+        setIsCloudSyncing(false);
+      }
     }
+
+    showToast(`Data demo (${demoBank.length} soal & ${demoStudents.length} siswa) berhasil dimuat!`);
+    fetchMasterDataSummary();
   };
 
   // Helper: Read Spreadsheet (supports .xlsx, .xls, .csv, and custom delimiters)
@@ -797,7 +1089,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     const studentsToSave = allParsedStudents.length > 0 ? allParsedStudents : previewStudents;
     if (studentsToSave.length === 0) return;
 
-    // Sanitize and normalize student objects
     const sanitized = studentsToSave.map((s: any, idx: number) => {
       const name = String(s.name || s.nama || s.Nama || s['Nama Siswa'] || s['NAMA'] || '').trim().toUpperCase();
       const noPeserta = String(s.noPeserta || s.no || s['No Peserta'] || s['No. Peserta'] || s['No '] || s['NIS'] || s['NO'] || idx + 1).trim();
@@ -806,11 +1097,23 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       return { no: idx + 1, name, noPeserta, className, subject };
     }).filter((s: any) => s.name && s.noPeserta);
 
-    // Save to localStorage immediately (supports GitHub Pages & Vercel static)
     try {
       localStorage.setItem('cbt_master_students', JSON.stringify(sanitized));
       setMasterStudentsCount(sanitized.length);
     } catch (e) {}
+
+    let savedToCloud = false;
+    if (auth.currentUser) {
+      setIsCloudSyncing(true);
+      try {
+        await saveRosterToCloud(examId, config, sanitized);
+        savedToCloud = true;
+      } catch (err) {
+        console.error('Cloud roster save error:', err);
+      } finally {
+        setIsCloudSyncing(false);
+      }
+    }
 
     try {
       const res = await fetch('/api/admin/upload-master-students', {
@@ -818,14 +1121,19 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ students: sanitized })
       });
-      const data = await res.json();
-      if (data && data.success) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = await res.json();
         showToast(data.message || `Berhasil menyimpan ${sanitized.length} data siswa!`);
       } else {
-        showToast(`Tersimpan: ${sanitized.length} data siswa`);
+        showToast(savedToCloud
+          ? `Tersimpan ke Cloud Firestore: ${sanitized.length} data siswa!`
+          : `Tersimpan di browser: ${sanitized.length} data siswa (Login Google untuk Cloud Sync).`);
       }
     } catch (err) {
-      showToast(`Tersimpan di browser: ${sanitized.length} data siswa`);
+      showToast(savedToCloud
+        ? `Tersimpan ke Cloud Firestore: ${sanitized.length} data siswa!`
+        : `Tersimpan di browser: ${sanitized.length} data siswa.`);
     }
 
     setShowUploadExcelModal(false);
@@ -859,7 +1167,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
     if (questionsToSave.length === 0) return;
     const cleanFileName = uploadFileName.replace(/\.[^/.]+$/, '').trim().toUpperCase();
 
-    // Map questions to client question bank format
     const newBank: any[] = questionsToSave.map((row: any, idx: number) => {
       const num = Number(row.NO || row.No || row.no || idx + 1);
       let subject = String(row.MAPEL || row.Mapel || (cleanFileName && cleanFileName !== 'SEMUA MAPEL' ? cleanFileName : 'TIK')).trim().toUpperCase();
@@ -897,7 +1204,7 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       };
     });
 
-    // Save to localStorage (merge or replace for updated subjects)
+    let combinedBank = newBank;
     try {
       let existingBank: any[] = [];
       const raw = localStorage.getItem('cbt_question_bank');
@@ -905,10 +1212,23 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
       const targetSubjects = Array.from(new Set(newBank.map((q: any) => String(q.subject).toUpperCase())));
       const filtered = existingBank.filter((q: any) => !targetSubjects.includes(String(q.subject).toUpperCase()));
-      const combined = [...filtered, ...newBank];
-      localStorage.setItem('cbt_question_bank', JSON.stringify(combined));
-      setQuestionsSummary(combined);
+      combinedBank = [...filtered, ...newBank];
+      localStorage.setItem('cbt_question_bank', JSON.stringify(combinedBank));
+      setQuestionsSummary(combinedBank);
     } catch (e) {}
+
+    let savedToCloud = false;
+    if (auth.currentUser) {
+      setIsCloudSyncing(true);
+      try {
+        await saveQuestionBankToCloud(examId, config, combinedBank);
+        savedToCloud = true;
+      } catch (err) {
+        console.error('Cloud question bank save error:', err);
+      } finally {
+        setIsCloudSyncing(false);
+      }
+    }
 
     try {
       const res = await fetch('/api/admin/upload-questions', {
@@ -919,14 +1239,19 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
           mapelFileName: cleanFileName
         })
       });
-      const data = await res.json();
-      if (data && data.success) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = await res.json();
         showToast(data.message || `Berhasil mengunggah ${newBank.length} soal!`);
       } else {
-        showToast(`Tersimpan ${newBank.length} soal di bank lokal.`);
+        showToast(savedToCloud
+          ? `Tersimpan ke Cloud Firestore: ${newBank.length} soal (siap diakses di Edge/Chrome/HP)!`
+          : `Tersimpan ${newBank.length} soal di browser (Login Google untuk Cloud Sync).`);
       }
     } catch (err) {
-      showToast(`Tersimpan ${newBank.length} soal di browser`);
+      showToast(savedToCloud
+        ? `Tersimpan ke Cloud Firestore: ${newBank.length} soal!`
+        : `Tersimpan ${newBank.length} soal di browser.`);
     }
 
     setShowUploadQuestionsModal(false);
@@ -972,7 +1297,6 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
   const handleConfirmSaveImages = async () => {
     if (previewImagesToUpload.length === 0) return;
 
-    // Save to localStorage
     try {
       let existingImages: Record<string, any> = {};
       const raw = localStorage.getItem('cbt_question_images');
@@ -985,20 +1309,38 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
       setQuestionImagesCount(Object.keys(existingImages).length);
     } catch (e) {}
 
+    let savedToCloud = false;
+    if (auth.currentUser) {
+      setIsCloudSyncing(true);
+      try {
+        await saveQuestionImagesToCloud(examId, config, previewImagesToUpload);
+        savedToCloud = true;
+      } catch (err) {
+        console.error('Cloud image save error:', err);
+      } finally {
+        setIsCloudSyncing(false);
+      }
+    }
+
     try {
       const res = await fetch('/api/admin/upload-question-images', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ files: previewImagesToUpload })
       });
-      const data = await res.json();
-      if (data && data.success) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = await res.json();
         showToast(data.message || `Berhasil mengunggah ${previewImagesToUpload.length} gambar soal!`);
       } else {
-        showToast(`Tersimpan lokal: ${previewImagesToUpload.length} gambar soal`);
+        showToast(savedToCloud
+          ? `Tersimpan ke Cloud Firestore: ${previewImagesToUpload.length} gambar soal!`
+          : `Tersimpan di browser: ${previewImagesToUpload.length} gambar soal.`);
       }
     } catch (err) {
-      showToast(`Tersimpan di browser: ${previewImagesToUpload.length} gambar`);
+      showToast(savedToCloud
+        ? `Tersimpan ke Cloud Firestore: ${previewImagesToUpload.length} gambar soal!`
+        : `Tersimpan di browser: ${previewImagesToUpload.length} gambar soal.`);
     }
 
     setShowUploadImagesModal(false);
@@ -1008,17 +1350,37 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
 
   const handleDeleteImage = async (cleanName: string) => {
     try {
+      const raw = localStorage.getItem('cbt_question_images');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        delete parsed[cleanName];
+        localStorage.setItem('cbt_question_images', JSON.stringify(parsed));
+      }
+    } catch (_) {}
+
+    if (auth.currentUser) {
+      try {
+        await deleteImageFromCloud(examId, cleanName);
+      } catch (_) {}
+    }
+
+    try {
       const res = await fetch(`/api/admin/question-image/${encodeURIComponent(cleanName)}`, {
         method: 'DELETE'
       });
-      const data = await res.json();
-      if (data.success) {
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Gambar ${cleanName} dihapus`);
+        }
+      } else {
         showToast(`Gambar ${cleanName} dihapus`);
-        fetchMasterDataSummary();
       }
     } catch (err) {
-      showToast('Gagal menghapus gambar');
+      showToast(`Gambar ${cleanName} dihapus`);
     }
+    fetchMasterDataSummary();
   };
 
   // Download Templates
@@ -1134,6 +1496,74 @@ export const TeacherAdmin: React.FC<Props> = ({ config, onUpdateConfig }) => {
               >
                 <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
                 <span>+ Muat Data Demo</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* CLOUD FIRESTORE SYNC BAR (CROSS-BROWSER & MULTI-DEVICE SUPPORT FOR EDGE/CHROME/MOBILE) */}
+        <div className={`rounded-2xl p-4 border shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+          cloudUser
+            ? 'bg-emerald-950/35 border-emerald-700/60'
+            : 'bg-amber-950/35 border-amber-600/60'
+        }`}>
+          <div className="flex items-start sm:items-center gap-3">
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+              cloudUser
+                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
+            }`}>
+              {cloudUser ? <Cloud className="w-5 h-5" /> : <CloudOff className="w-5 h-5" />}
+            </div>
+            <div className="space-y-0.5">
+              <div className="text-xs font-bold flex items-center gap-2 flex-wrap">
+                <span className={cloudUser ? 'text-emerald-300' : 'text-amber-300'}>
+                  {cloudUser
+                    ? `Cloud Database Aktif (${cloudUser.email})`
+                    : 'Cloud Sync Belum Aktif (Baru Tersimpan di Browser Ini Saja)'}
+                </span>
+                <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-slate-900/90 border border-slate-700 text-slate-300">
+                  ID Ujian: {examId}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                {cloudUser
+                  ? 'Semua soal, gambar JPG/PNG, data siswa, dan nilai ujian otomatis tersimpan di Cloud agar siswa di MS Edge, Chrome lain, atau HP bisa langsung mengakses tanpa login.'
+                  : 'Agar soal & gambar yang Anda upload bisa dibuka siswa di MS Edge / browser lain / HP, aktifkan Cloud Sync dengan klik tombol Login Google Guru di samping.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {cloudUser ? (
+              <>
+                <button
+                  type="button"
+                  disabled={isCloudSyncing}
+                  onClick={() => syncLocalDataToCloud(config)}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow transition flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isCloudSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isCloudSyncing ? 'Menyinkronkan...' : 'Sinkronkan ke Cloud'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCloudSignOut}
+                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-semibold text-xs rounded-xl transition flex items-center gap-1"
+                  title="Keluar dari akun Cloud Guru"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Keluar</span>
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={handleCloudGoogleSignIn}
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs rounded-xl shadow-lg transition flex items-center gap-1.5"
+              >
+                <Cloud className="w-4 h-4" />
+                <span>Login Google Guru (Aktifkan Cloud Sync)</span>
               </button>
             )}
           </div>
